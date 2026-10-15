@@ -23,9 +23,22 @@
 #include "Importers/Constructor/ImportReader.h"
 #include "Modules/Cloud/Cloud.h"
 #include "Settings/Runtime.h"
+#include "Utilities/AssetPaths.h"
+
+namespace {
+	/* Existing engine plugins can be installed but disabled. Mount their content without
+	 * enabling code modules or creating a second plugin with the same name. */
+	void EnsureContentMount(const FString& Path) {
+		if (!Path.StartsWith(TEXT("/"))) return;
+		FString Name, Rest;
+		if (!Path.Mid(1).Split(TEXT("/"), &Name, &Rest)) return;
+		if (Name != TEXT("Game") && Name != TEXT("Engine")) MountImportedPluginContent(Name);
+	}
+}
 
 /* CreateAssetPackage Implementations ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ */
 UPackage* FAssetUtilities::CreateAssetPackage(const FString& Path) {
+	EnsureContentMount(Path);
 	/* A path off disk rather than a package path gets this far when the export was reflected from
 	 * somewhere outside the project, and the asset registry crashes on one that has no leading
 	 * slash rather than refusing it. */
@@ -61,6 +74,20 @@ UPackage* FAssetUtilities::CreateAssetPackage(const FString& Path) {
 }
 
 UPackage* FAssetUtilities::CreateAssetPackage(const FString& Name, const FString& OutputPath, FString& FailureReason) {
+	/* Cloud's absolute package paths already identify the destination folder. They must
+	 * not be interpreted as disk export directories merely because a plugin says Content. */
+	FString OutputRoot, OutputRest;
+	const bool HasRoot = OutputPath.StartsWith(TEXT("/")) && OutputPath.Mid(1).Split(TEXT("/"), &OutputRoot, &OutputRest);
+	if (HasRoot && (OutputRoot == TEXT("Game") || OutputRoot == TEXT("Engine") || GetPlugin(OutputRoot).IsValid())) {
+		const FString Canonical = ToEditorPackagePath(OutputPath);
+		FString PackagePart = Canonical;
+		Canonical.Split(TEXT("."), &PackagePart, nullptr);
+		const FString Destination = FPackageName::GetLongPackagePath(PackagePart) + TEXT("/") + Name;
+		EnsureContentMount(Destination);
+		UPackage* Result = CreateAssetPackage(Destination);
+		if (Result == nullptr) FailureReason = FString::Printf(TEXT("Cannot create package %s"), *Destination);
+		return Result;
+	}
 	const FString& ProjectName = GReflectionRuntime.Profile.ProjectName;
 
 	FString ModifiablePath = OutputPath;
@@ -236,8 +263,9 @@ namespace {
 	 * file is in, and the asset's own name. */
 	template <typename T>
 	TObjectPtr<T> FindByReference(const FString& Path) {
-		FString Redirected = Path;
+		FString Redirected = ToEditorPackagePath(Path);
 		FRRedirects::Redirect(Redirected);
+		EnsureContentMount(Redirected);
 
 		if (TObjectPtr<T> Found = LoadObjectByPath<T>(Redirected)) {
 			return Found;
@@ -361,7 +389,7 @@ bool FAssetUtilities::ConstructAsset(const FString& Path, const FString& RealPat
 				CreatePlugin(RootName);
 			}
 
-			IImporter* OutImporter;
+			IImporter* OutImporter = nullptr;
 			bSuccess = IImportReader::ReadExportsAndImport(Response->GetArrayField(TEXT("exports")), PackagePath, OutImporter, true);
 
 			/* Define found object */

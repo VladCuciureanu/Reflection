@@ -4,9 +4,12 @@
  * looked at without anyone sat in front of the editor:
  *
  *     -run=ReflectImport -path=<cloud asset path>
+ *     -run=ReflectImport -paths=<file with one cloud asset path per line, # comments and blanks skipped>
  *
- * It imports and saves, and says what came out: the objects the package ended up holding, and for
- * anything carrying a graph, how much of that graph is there. Enough to tell an import that worked
+ * A batch imports every path in one sitting and saves once at the end; -json= names the file for
+ * one asset and the directory for a batch. It imports and saves, and says what came out: the
+ * objects the package ended up holding, and for anything carrying a graph, how much of that
+ * graph is there. Enough to tell an import that worked
  * from one that made the objects and none of the wiring. */
 
 #pragma once

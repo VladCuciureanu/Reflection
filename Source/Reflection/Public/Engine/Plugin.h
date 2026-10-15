@@ -15,11 +15,39 @@
 #endif
 
 #include "Interfaces/IPluginManager.h"
+#include "Misc/PackageName.h"
+#include "Misc/ConfigCacheIni.h"
 
 #include "Engine/Notifications.h"
 
 inline TSharedPtr<IPlugin> GetPlugin(const FString& Name) {
 	return IPluginManager::Get().FindPlugin(Name);
+}
+
+/* Keep content-only mounts across editor/commandlet restarts without enabling code modules. */
+inline void MountImportedPluginContent(const FString& Name, const bool Remember = true) {
+	const TSharedPtr<IPlugin> Plugin = GetPlugin(Name);
+	if (!Plugin.IsValid() || !Plugin->GetDescriptor().bCanContainContent) return;
+	const FString Mount = TEXT("/") + Name + TEXT("/");
+	if (!FPackageName::MountPointExists(Mount)) {
+		FPackageName::RegisterMountPoint(Mount, Plugin->GetContentDir() + TEXT("/"));
+	}
+	if (Remember && GConfig && !GEditorPerProjectIni.IsEmpty()) {
+		TArray<FString> Roots;
+		GConfig->GetArray(TEXT("Reflection.ImportedContentMounts"), TEXT("Roots"), Roots, GEditorPerProjectIni);
+		if (!Roots.Contains(Name)) {
+			Roots.Add(Name);
+			GConfig->SetArray(TEXT("Reflection.ImportedContentMounts"), TEXT("Roots"), Roots, GEditorPerProjectIni);
+			GConfig->Flush(false, GEditorPerProjectIni);
+		}
+	}
+}
+
+inline void RestoreImportedPluginContent() {
+	if (!GConfig || GEditorPerProjectIni.IsEmpty()) return;
+	TArray<FString> Roots;
+	GConfig->GetArray(TEXT("Reflection.ImportedContentMounts"), TEXT("Roots"), Roots, GEditorPerProjectIni);
+	for (const FString& Name : Roots) MountImportedPluginContent(Name, false);
 }
 
 /* Creates a plugin in the name (may result in bugs if inputted wrong) */
