@@ -23,11 +23,68 @@ DECLARE_LOG_CATEGORY_CLASS(LogReflectImport, All, All);
 int32 UReflectImportCommandlet::Main(const FString& Params) {
 	FString Path;
 
-	if (!FParse::Value(*Params, TEXT("path="), Path) || Path.IsEmpty()) {
-		UE_LOG(LogReflectImport, Error, TEXT("nothing to import: give it -path=<cloud asset path>"));
+	const bool bHasPath = FParse::Value(*Params, TEXT("path="), Path) && !Path.IsEmpty();
+
+	FString PathsFile;
+
+	const bool bHasPaths = FParse::Value(*Params, TEXT("paths="), PathsFile) && !PathsFile.IsEmpty();
+
+	if (bHasPath == bHasPaths) {
+		UE_LOG(LogReflectImport, Error, TEXT("give it exactly one of -path=<cloud asset path> or -paths=<file with one cloud asset path per line>"));
 
 		return 1;
 	}
+
+	TArray<FString> Queued;
+
+	if (bHasPaths) {
+		if (!FFileHelper::LoadFileToStringArray(Queued, *PathsFile)) {
+			UE_LOG(LogReflectImport, Error, TEXT("there is nothing to read at \"%s\""), *PathsFile);
+
+			return 1;
+		}
+
+		for (int32 i = Queued.Num() - 1; i >= 0; --i) {
+			Queued[i].TrimStartAndEndInline();
+
+			if (Queued[i].IsEmpty() || Queued[i].StartsWith(TEXT("#"))) {
+				Queued.RemoveAt(i);
+			}
+		}
+
+		if (Queued.Num() == 0) {
+			UE_LOG(LogReflectImport, Error, TEXT("\"%s\" names no asset"), *PathsFile);
+
+			return 1;
+		}
+
+		FString FromCheck;
+
+		if (FParse::Value(*Params, TEXT("from="), FromCheck) && !FromCheck.IsEmpty()) {
+			UE_LOG(LogReflectImport, Error, TEXT("-from= replays one export; it does not go with -paths="));
+
+			return 1;
+		}
+	} else {
+		Queued.Add(Path);
+	}
+
+	const bool bBatch = Queued.Num() > 1;
+
+	FString JsonDump;
+
+	FParse::Value(*Params, TEXT("json="), JsonDump);
+
+	/* One asset's response goes to the file it names; a batch goes to that many files
+	 * under the directory it names */
+	if (bBatch && !JsonDump.IsEmpty()) {
+		IFileManager::Get().MakeDirectory(*JsonDump, true);
+	}
+
+	int32 Failures = 0;
+
+	for (const FString& One : Queued) {
+		Path = One;
 
 	/* Who the exports belong to, which every path read out of them is said in terms of.
 	 *
@@ -55,13 +112,15 @@ int32 UReflectImportCommandlet::Main(const FString& Params) {
 		if (!FFileHelper::LoadFileToString(Held, *From)) {
 			UE_LOG(LogReflectImport, Error, TEXT("there is nothing to read at \"%s\""), *From);
 
-			return 1;
+			Failures++;
+			continue;
 		}
 
 		if (!FJsonSerializer::Deserialize(TJsonReaderFactory<>::Create(Held), Response) || !Response.IsValid()) {
 			UE_LOG(LogReflectImport, Error, TEXT("\"%s\" is not something that reads as json"), *From);
 
-			return 1;
+			Failures++;
+			continue;
 		}
 
 		UE_LOG(LogReflectImport, Display, TEXT("reading \"%s\" rather than asking the cloud"), *From);
@@ -72,7 +131,8 @@ int32 UReflectImportCommandlet::Main(const FString& Params) {
 	if (!Response.IsValid() || !Response->HasField(TEXT("exports"))) {
 		UE_LOG(LogReflectImport, Error, TEXT("there was nothing at \"%s\""), *Path);
 
-		return 1;
+		Failures++;
+		continue;
 	}
 
 	const TArray<TSharedPtr<FJsonValue>> Exports = Response->GetArrayField(TEXT("exports"));
@@ -81,7 +141,16 @@ int32 UReflectImportCommandlet::Main(const FString& Params) {
 
 	/* What came back, kept where it was asked for, since what the cloud gave is the only thing the
 	 * result is worth checking against */
-	if (FString Dump; FParse::Value(*Params, TEXT("json="), Dump) && !Dump.IsEmpty()) {
+	FString Dump = JsonDump;
+
+	if (bBatch && !Dump.IsEmpty()) {
+		FString AssetName;
+
+		Path.Split(TEXT("/"), nullptr, &AssetName, ESearchCase::IgnoreCase, ESearchDir::FromEnd);
+		Dump /= AssetName + TEXT(".json");
+	}
+
+	if (!Dump.IsEmpty()) {
 		FString Written;
 
 		const TSharedRef<TJsonWriter<>> Writer = TJsonWriterFactory<>::Create(&Written);
@@ -98,7 +167,8 @@ int32 UReflectImportCommandlet::Main(const FString& Params) {
 	if (!bImported || Importer == nullptr) {
 		UE_LOG(LogReflectImport, Error, TEXT("nothing was made from \"%s\""), *Path);
 
-		return 1;
+		Failures++;
+		continue;
 	}
 
 	/* What the package ended up holding, and how much of any graph in it is wired */
@@ -179,6 +249,11 @@ int32 UReflectImportCommandlet::Main(const FString& Params) {
 			Loose, LoosePins, LooseLinks);
 	}
 
+	if (bBatch) {
+		UE_LOG(LogReflectImport, Display, TEXT("%d of %d asset(s) imported"), Queued.Num() - Failures, Queued.Num());
+	}
+	}
+
 	TArray<UPackage*> Dirty;
 	FEditorFileUtils::GetDirtyContentPackages(Dirty);
 	FEditorFileUtils::GetDirtyWorldPackages(Dirty);
@@ -204,5 +279,5 @@ int32 UReflectImportCommandlet::Main(const FString& Params) {
 
 	UE_LOG(LogReflectImport, Display, TEXT("%d package(s) saved"), Saved);
 
-	return 0;
+	return Failures > 0 ? 1 : 0;
 }

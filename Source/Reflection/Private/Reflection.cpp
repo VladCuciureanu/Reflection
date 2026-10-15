@@ -19,6 +19,7 @@
 #include "Modules/UI/Validation/ValidationTab.h"
 #include "Modules/Toolbar/Toolbar.h"
 #include "Engine/EngineUtilities.h"
+#include "Engine/Plugin.h"
 
 #include "Logging/LogVerbosity.h"
 #include "JsonGlobals.h"
@@ -30,6 +31,7 @@
 #endif
 
 void FReflectionModule::StartupModule() {
+	RestoreImportedPluginContent();
 	LogHttp.SetVerbosity(ELogVerbosity::Error);
 
 	/* Exports are read by asking for fields that may not be there, which is how the reader tells

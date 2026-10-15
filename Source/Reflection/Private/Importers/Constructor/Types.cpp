@@ -50,6 +50,8 @@ TMap<FString, TArray<FString>> ImportTypes::Templated = {
 		TEXT("Material Assets"),
 		{
 			TEXT("MaterialParameterCollection"),
+			/* Instances hold a parent and parameter arrays, not a separate expression graph. */
+			TEXT("MaterialFunctionInstance"),
 			TEXT("SubsurfaceProfile"),
 		}
 	},

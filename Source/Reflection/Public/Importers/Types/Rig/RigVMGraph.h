@@ -13,6 +13,7 @@ class UControlRigBlueprint;
 class UPropertySerializer;
 class URigVMController;
 class URigVMGraph;
+class URigVMLibraryNode;
 class URigVMNode;
 class URigVMPin;
 
@@ -39,6 +40,16 @@ struct FRigVMGraphStats {
 	/* Nodes the graph refused to take, and links it refused to make */
 	int32 FailedNodes = 0;
 	int32 FailedLinks = 0;
+
+	/* Callables rebuilt as functions of the rig's own library, and the calls to them */
+	int32 Functions = 0;
+	int32 FunctionReferences = 0;
+
+	/* Function arguments no pin or registered type could name, so they were left off the function */
+	int32 UntypedArguments = 0;
+
+	/* Functions whose body runs a node this engine build doesn't have, which a call to them skips */
+	TArray<FString> UnresolvedFunctions;
 };
 
 /* Rebuilds a rig's graph out of the RigVM its graph was compiled into.
@@ -50,9 +61,12 @@ struct FRigVMGraphStats {
  * node, each shared register into a link, each literal into a pin default, and the byte code's
  * branch table into the execution the graph is wired up with.
  *
- * What it cannot put back is anything the compiler flattened. Collapsed nodes and function
- * references are gone by the time the VM exists, so their contents come back as nodes in the graph
- * they were compiled into. */
+ * A function the rig calls is compiled into the same bytecode as a callable: a range of
+ * instructions with arguments, run by an invoke instruction. Each one comes back as a function of
+ * the rig's own library and each invoke as a reference to it.
+ *
+ * What it cannot put back is anything the compiler flattened. Collapsed nodes are gone by the time
+ * the VM exists, so their contents come back as nodes in the graph they were compiled into. */
 class REFLECTION_API FRigVMGraphReconstruction {
 public:
 	FRigVMGraphReconstruction(UControlRigBlueprint* InBlueprint, UPropertySerializer* InPropertySerializer);
@@ -96,7 +110,47 @@ private:
 		TArray<FString> Arguments;
 		TArray<bool> ArgumentIsOutput;
 
+		/* The callable whose function graph the node sits in, none for the rig's own graph */
+		int32 Callable = INDEX_NONE;
+
+		/* The callable an invoke instruction runs, which makes the node a reference to it */
+		int32 Invokes = INDEX_NONE;
+
 		URigVMNode* Node = nullptr;
+	};
+
+	/* One argument of a function compiled into the bytecode */
+	struct FCallableArgument {
+		FString Name;
+		FString TypeString;
+
+		bool bInput = true;
+		bool bOutput = false;
+
+		/* The register the function's own graph names the argument by, and the one the invoke
+		 * points at the caller's value while the function runs, which is what its body reads */
+		int32 InterfaceRegister = INDEX_NONE;
+		int32 ForwardedRegister = INDEX_NONE;
+
+		/* What the function's entry or return node calls the argument, empty when it couldn't
+		 * be given a type */
+		FString PinName;
+	};
+
+	/* A function compiled into the bytecode: a range of instructions an invoke runs */
+	struct FCallable {
+		FString Name;
+
+		int32 First = INDEX_NONE;
+		int32 Last = INDEX_NONE;
+
+		TArray<FCallableArgument> Arguments;
+
+		URigVMLibraryNode* Function = nullptr;
+
+		/* The function's entry and return nodes, as nodes of the reconstruction */
+		int32 EntryNode = INDEX_NONE;
+		int32 ReturnNode = INDEX_NONE;
 	};
 
 	/* An execute block: a range of instructions hanging off one pin of a control flow node */
@@ -113,6 +167,25 @@ private:
 	};
 
 	void ReadMemory(const FUObjectJsonValueExport& VirtualMachine);
+	void ReadCallables(const FUObjectJsonValueExport& ByteCode);
+
+	/* The innermost callable an instruction belongs to, none for the rig's own graph */
+	int32 FindCallable(int32 Instruction) const;
+
+	/* The graph a callable's nodes go in, and the controller that edits whichever graph a node is in */
+	URigVMGraph* GetCallableGraph(int32 Callable) const;
+	URigVMController* GetController(int32 Callable) const;
+	URigVMController* GetController(const URigVMNode* Node) const;
+
+	/* Empties the rig's function library of an earlier run's functions and adds one per callable */
+	void CreateFunctions();
+
+	/* Gives each function its arguments, typed by the pins that read them, and wires its entry and
+	 * return nodes to the registers its body reads them through */
+	void ExposeArguments();
+
+	/* Puts a reference to the function wherever an invoke instruction runs it */
+	void CreateFunctionReferences();
 	void CollectNodes(const TArray<FUObjectJsonValueExport>& Instructions, const TArray<FString>& FunctionNames);
 
 	/* Gives every register to the pin it is named after, written pins first */
@@ -126,12 +199,15 @@ private:
 	/* Folds leaf defaults back into the pin that owns them, which is where saving reads from */
 	void ConsolidateDefaults();
 
-	/* Lays the graph out left to right: each node one column right of everything feeding it */
-	void UpdateLayout();
+	/* Lays a graph out left to right: each node one column right of everything feeding it */
+	void UpdateLayout(URigVMGraph* InGraph);
 
 	/* Turns collapsed graphs' local variables into rig variables so their first writer has a
 	 * source. Runs last: making a variable compiles the blueprint, which may collect garbage. */
 	void PromoteLocalVariables();
+	/* Follows whole-value copies so a register no pin is named after belongs to the pin it is
+	 * copied from or to, and makes a set node for every copy into one of the rig's variables */
+	void CreateVariableSetters(const TArray<FUObjectJsonValueExport>& Instructions);
 	void CreateLinks(const TArray<FUObjectJsonValueExport>& Instructions);
 	void CreateExecution(const TArray<FUObjectJsonValueExport>& Instructions, const FUObjectJsonValueExport& ByteCode);
 
@@ -179,6 +255,8 @@ private:
 
 	TArray<FNode> Nodes;
 	TMap<int32, int32> InstructionToNode;
+
+	TArray<FCallable> Callables;
 
 	TMap<FString, URigVMNode*> VariableGetters;
 	TSet<FString> NodeNames;

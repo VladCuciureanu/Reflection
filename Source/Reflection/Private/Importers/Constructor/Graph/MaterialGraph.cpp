@@ -14,6 +14,7 @@
 #include "Engine/EngineUtilities.h"
 #include "Importers/Constructor/ImportIssues.h"
 #include "Utilities/JsonHelpers.h"
+#include "Utilities/MaterialExpressionIdentity.h"
 
 #if ENGINE_UE5
 #include "Materials/MaterialExpressionTextureBase.h"
@@ -37,6 +38,9 @@
 
 TSharedPtr<FJsonObject> IMaterialGraph::FindMaterialData(const FString& Type, FUObjectExportContainer* Container) {
 	TSharedPtr<FJsonObject> EditorOnlyData;
+	FString OriginalPackagePath;
+	if (AssetExport->JsonObject->TryGetStringField(TEXT("Package"), OriginalPackagePath))
+		NormalizeMaterialExpressionIdentities(GetContainer()->Exports, OriginalPackagePath);
 
 	for (FUObjectExport* Export : GetContainer()->Exports) {
 		FString ExportType = Export->GetType().ToString();

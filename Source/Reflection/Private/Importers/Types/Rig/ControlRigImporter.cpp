@@ -260,12 +260,26 @@ int32 IControlRigImporter::ConstructHierarchy(UControlRigBlueprint* Blueprint) c
 		Description.Parent = ReadElementKey(Json.GetObject(TEXT("ParentKey")));
 
 		if (!Description.Parent.IsValid()) {
-			const TArray<FUObjectJsonValueExport> Constraints = Json.Has(TEXT("ParentConstraints"))
-				? Json.GetArray(TEXT("ParentConstraints"))
-				: TArray<FUObjectJsonValueExport>();
+			TArray<FUObjectJsonValueExport> Constraints;
+
+			/* Written either as the constraints themselves, or as the struct that holds them next to
+			 * their weights, where each one names its parent by key */
+			if (Json.JsonObject->HasTypedField<EJson::Array>(TEXT("ParentConstraints"))) {
+				Constraints = Json.GetArray(TEXT("ParentConstraints"));
+			} else if (Json.JsonObject->HasTypedField<EJson::Object>(TEXT("ParentConstraints"))) {
+				const FUObjectJsonValueExport Holder = Json.GetObject(TEXT("ParentConstraints"));
+
+				if (Holder.JsonObject->HasTypedField<EJson::Array>(TEXT("ParentConstraints"))) {
+					Constraints = Holder.GetArray(TEXT("ParentConstraints"));
+				}
+			}
 
 			if (Constraints.Num() > 0) {
-				Description.Parent = ReadElementKey(Constraints[0].GetObject(TEXT("ParentElement")).GetObject(TEXT("Key")));
+				Description.Parent = ReadElementKey(Constraints[0].GetObject(TEXT("ParentKey")));
+
+				if (!Description.Parent.IsValid()) {
+					Description.Parent = ReadElementKey(Constraints[0].GetObject(TEXT("ParentElement")).GetObject(TEXT("Key")));
+				}
 
 				if (!Description.Parent.IsValid()) {
 					Description.Parent = ReadElementKey(Constraints[0].GetObject(TEXT("ParentElement")));
@@ -470,22 +484,44 @@ void IControlRigImporter::ConstructGraph(UControlRigBlueprint* Blueprint) const 
 
 	const FRigVMGraphStats& Stats = Reconstruction.GetStats();
 
-	UE_LOG(LogReflection, Log, TEXT("\"%s\" rebuilt %d nodes, %d links and %d pin defaults from %d instructions"),
-		*GetAssetName(), Stats.Nodes, Stats.Links, Stats.Defaults, Stats.Instructions);
+	UE_LOG(LogReflection, Log, TEXT("\"%s\" rebuilt %d nodes, %d links and %d pin defaults from %d instructions, with %d functions and %d calls to them"),
+		*GetAssetName(), Stats.Nodes, Stats.Links, Stats.Defaults, Stats.Instructions, Stats.Functions, Stats.FunctionReferences);
 
-	/* Collapsed nodes and function references are compiled away long before the VM exists, so what
-	 * comes back is the graph the VM runs rather than the one that was drawn */
+	/* Collapsed nodes are compiled away long before the VM exists, so what comes back is the graph
+	 * the VM runs rather than the one that was drawn. Functions survive as callables. */
 	FImportIssues::Report(
 		EImportIssue::Data,
 		TEXT("The rig's graph was rebuilt from its bytecode"),
 		FString::Printf(
-			TEXT("%d nodes, %d links and %d pin defaults, out of %d instructions. A cook keeps only the compiled VM, so collapsed nodes and function references come back as the nodes they were compiled into, and comments and node positions are gone."),
+			TEXT("%d nodes, %d links and %d pin defaults, out of %d instructions, and %d functions called %d times. A cook keeps only the compiled VM, so collapsed nodes come back as the nodes they were compiled into, functions come back in the rig's own library rather than the one they were authored in, and comments and node positions are gone."),
 			Stats.Nodes,
 			Stats.Links,
 			Stats.Defaults,
-			Stats.Instructions
+			Stats.Instructions,
+			Stats.Functions,
+			Stats.FunctionReferences
 		)
 	);
+
+	if (Stats.UnresolvedFunctions.Num() > 0) {
+		FImportIssues::Report(
+			EImportIssue::MissingClass,
+			TEXT("Some of the rig's functions run nodes this engine build doesn't have"),
+			FString::Printf(
+				TEXT("%d of them: %s. The functions are rebuilt and called where the rig calls them, but the missing nodes are left out, so a call does nothing they would have done."),
+				Stats.UnresolvedFunctions.Num(),
+				*FString::Join(Stats.UnresolvedFunctions, TEXT(", "))
+			)
+		);
+	}
+
+	if (Stats.UntypedArguments > 0) {
+		FImportIssues::Report(
+			EImportIssue::Data,
+			TEXT("Some function arguments couldn't be given a type"),
+			FString::Printf(TEXT("%d of them. Nothing inside their function reads them as a pin and the engine doesn't know their type by name, so they were left off the function along with what the callers passed in."), Stats.UntypedArguments)
+		);
+	}
 
 	if (Stats.MissingFunctions.Num() > 0) {
 		FImportIssues::Report(

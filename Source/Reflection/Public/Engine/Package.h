@@ -198,6 +198,10 @@ inline bool HandleAssetCreation(UObject* Asset, UPackage* Package, const bool bB
 
 	Asset->PostLoad();
 
+	/* A RigVM asset's PostLoad ends by setting its package's dirty flag to whether loading changed
+	 * it, which for an asset made here is never, so it would be left looking saved */
+	Package->SetDirtyFlag(true);
+
 	return true;
 }
 
