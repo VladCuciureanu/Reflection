@@ -45,6 +45,22 @@ bool FTextureFormats::GetLayout(const EPixelFormat Format, FTextureSourceLayout&
 			OutLayout.BytesPerBlock = 8;
 			return true;
 
+#if UE5_7_BEYOND
+		/* Preserve cooked float precision; these formats map directly to editor source data. */
+		case PF_R16F:
+		case PF_R16F_FILTER:
+			OutLayout.SourceFormat = TSF_R16F;
+			OutLayout.BytesPerVoxel = 2;
+			OutLayout.BytesPerBlock = 2;
+			return true;
+
+		case PF_A32B32G32R32F:
+			OutLayout.SourceFormat = TSF_RGBA32F;
+			OutLayout.BytesPerVoxel = 16;
+			OutLayout.BytesPerBlock = 16;
+			return true;
+#endif
+
 	/* TSF_G16 arrived in 4.25, before that a 16 bit grey source has no matching source format */
 #if !UE4_24_BELOW
 		case PF_G16:
@@ -148,6 +164,11 @@ void FTextureFormats::Decode(const uint8* Data, uint8* OutData, const int32 Size
 		 * G16: Gray/Grey like G8 */
 		case PF_B8G8R8A8:
 		case PF_FloatRGBA:
+#if UE5_7_BEYOND
+		case PF_R16F:
+		case PF_R16F_FILTER:
+		case PF_A32B32G32R32F:
+#endif
 		case PF_G16: {
 			FMemory::Memcpy(OutData, Data, DecodedSize);
 		}
