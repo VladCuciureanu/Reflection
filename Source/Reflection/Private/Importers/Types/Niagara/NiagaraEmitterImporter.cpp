@@ -254,6 +254,20 @@ void FNiagaraEmitterRepair::Repair(FUObjectExportContainer* Container, UObject* 
 		);
 	}
 
+	/* No parent to merge with again. An emitter made from another keeps which one (VersionedParent) and
+	 * what it last merged (VersionedParentAtLastMerge), and the editor merges the parent's changes in when
+	 * the two disagree. A cooked emitter has its parent's modules folded into its own graph already, and
+	 * the parent's copy that came across is not one the merge can read: FN_ImpactMajor_Burst_Baseline's
+	 * emitters took the editor down in FNiagaraScriptMergeManager::MergeEmitter on a null script. Cleared,
+	 * the emitter stands on its own graph, which is what it plays. */
+	for (const FNiagaraVersion& Version : Versions) {
+		for (const TCHAR* Field : { TEXT("VersionedParent"), TEXT("VersionedParentAtLastMerge") }) {
+			if (const FStructProperty* Parent = FindFProperty<FStructProperty>(Version.Struct, Field)) {
+				Parent->ClearValue_InContainer(Version.Data);
+			}
+		}
+	}
+
 	/* What a load would have given each version and an import doesn't: the lock its running
 	 * instances report their particle counts under (Tick takes it, and a version read in rather
 	 * than loaded has none, so the first frame that spawns it crashes in this session), its stats
