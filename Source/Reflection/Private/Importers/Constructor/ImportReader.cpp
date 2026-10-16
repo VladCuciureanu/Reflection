@@ -157,6 +157,14 @@ bool IImportReader::ReadExportsAndImport(const TArray<TSharedPtr<FJsonValue>>& E
 
 	FUObjectExportContainer* Container = new FUObjectExportContainer(Exports);
 
+	/* The package being read, by the game path its subobjects name as their outer's */
+	FString PackagePath;
+	for (const FUObjectExport* Export : Container->Exports) {
+		const TSharedPtr<FJsonObject>* Outer = nullptr;
+		if (Export->IsJsonValid() && Export->JsonObject->TryGetObjectField(TEXT("Outer"), Outer) && (*Outer)->TryGetStringField(TEXT("ObjectPath"), PackagePath)) break;
+	}
+	const FAssetUtilities::FOpenPackageScope OpenPackage(PackagePath);
+
 	const bool IsBlueprint = Container->FindByType(FString("BlueprintGeneratedClass"))->IsJsonValid();
 	
 	for (FUObjectExport* Export : InDependencyOrder(Container)) {
