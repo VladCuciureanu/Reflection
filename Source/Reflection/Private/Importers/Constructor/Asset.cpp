@@ -329,6 +329,20 @@ bool FAssetUtilities::ConstructAsset(const FString& Path, const FString& RealPat
 		return true;
 	}
 
+	/* Anything else inside a file that is already being read is that read's to make, or nobody's.
+	 *
+	 * Fetching it means fetching the whole file, and the whole file is the asset being read: a Niagara
+	 * system's cooked data names its own data interfaces by a short path the reader can't place, and
+	 * each such name imported the system again, nested, once per name (NS_Apprentice_Body seven
+	 * times over). A texture is the exception the run above describes, since no package import builds
+	 * one, and it is fetched by itself rather than through its file. */
+	if (!ConstructionScope.bOwned && !IsTexture) {
+		OutObject = FindByReference<T>(RealPath);
+		bSuccess = OutObject != nullptr;
+
+		return true;
+	}
+
 	/* Every path out of here is a request. With no Cloud to answer them, each reference would sit
 	 * on a connection that is never going to be made, behind a scope announcing it, and end up
 	 * exactly where it started. */
@@ -398,4 +412,13 @@ bool FAssetUtilities::ConstructAsset(const FString& Path, const FString& RealPat
 /* Textures live in FTextureImport, this is the seam other tools still reach through */
 bool FAssetUtilities::Fast_Construct_TypeTexture(const TSharedPtr<FJsonObject>& JsonExport, const FString& Path, const FString& Type, TArray<uint8> Data, UTexture*& OutTexture) {
 	return FTextureImport::FromExport(JsonExport, Path, Type, Data, OutTexture);
+}
+
+FAssetUtilities::FOpenPackageScope::FOpenPackageScope(const FString& PackagePath) : Path(FileOf(PackagePath)) {
+	bOwned = !Path.IsEmpty() && !GAssetsUnderConstruction.Contains(Path);
+	if (bOwned) GAssetsUnderConstruction.Add(Path);
+}
+
+FAssetUtilities::FOpenPackageScope::~FOpenPackageScope() {
+	if (bOwned) GAssetsUnderConstruction.Remove(Path);
 }

@@ -36,6 +36,17 @@ public:
 		}
 	};
 
+	/* Marks the package a run is reading (its game path) as under construction for the scope's life, the way
+	 * ConstructAsset marks the files it opens, so a reference into it is answered from it rather than by
+	 * importing it again. */
+	struct REFLECTION_API FOpenPackageScope {
+		explicit FOpenPackageScope(const FString& PackagePath);
+		~FOpenPackageScope();
+
+		FString Path;
+		bool bOwned = false;
+	};
+
 	/* Importing assets from Cloud */
 	template <class T = UObject>
 	static bool ConstructAsset(const FString& Path, const FString& RealPath, const FString& Type, TObjectPtr<T>& OutObject, bool& bSuccess);
