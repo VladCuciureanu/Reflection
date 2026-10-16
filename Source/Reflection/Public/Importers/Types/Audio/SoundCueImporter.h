@@ -10,6 +10,12 @@ public:
 	virtual bool Import() override;
 };
 
-REGISTER_IMPORTER(ISoundCueImporter, {
-	"SoundCue"
-}, "Sound Assets");
+/* Fortnite's cue classes (FortSoundCueTemplate and the emote cues built on it) are SoundCues with a
+ * few defaults of their own; their graphs are ordinary cue graphs, so they come across as SoundCues. */
+REGISTER_IMPORTER(ISoundCueImporter, (TArray<FString>{
+	TEXT("SoundCue"),
+	TEXT("FortSoundCueTemplate"),
+	TEXT("EmoteFoley"),
+	TEXT("EmoteMusic"),
+	TEXT("EmoteMusic3P")
+}), TEXT("Sound Assets"));

@@ -1,5 +1,6 @@
 /* Copyright Reflection Contributors 2024-2026 */
 
+#include "Sound/SoundCue.h"
 #include "Importers/Constructor/ImportReader.h"
 
 #include "Importers/Constructor/ImportIssues.h"
@@ -276,6 +277,14 @@ IImporter* IImportReader::ReadExportAndImport(FUObjectExportContainer* Container
 		Class = UControlRigBlueprint::StaticClass();
 	}
 #endif
+
+	/* Fortnite's sound cue classes (FortSoundCueTemplate and the emote cues built on it) are native
+	 * to the game and missing here. They are SoundCues with a few defaults of their own, and what
+	 * makes the sound is the cue graph, so a SoundCue stands in and the cue importer builds it. */
+	if (Class == nullptr && (Type == TEXT("FortSoundCueTemplate") || Type == TEXT("EmoteFoley")
+		|| Type == TEXT("EmoteMusic") || Type == TEXT("EmoteMusic3P"))) {
+		Class = USoundCue::StaticClass();
+	}
 
 	if (Class == nullptr) return nullptr;
 
