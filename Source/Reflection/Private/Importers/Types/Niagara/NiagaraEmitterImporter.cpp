@@ -4,6 +4,7 @@
 #include "Importers/Types/Niagara/NiagaraGraphs.h"
 #include "Importers/Types/Niagara/NiagaraVersions.h"
 #include "Importers/Types/Niagara/NiagaraCookedCache.h"
+#include "Importers/Types/Niagara/NiagaraEmitterRepair.h"
 
 #include "Engine/EngineUtilities.h"
 
@@ -93,27 +94,8 @@ namespace {
 	}
 }
 
-void INiagaraEmitterImporter::Repair(UObject* Asset) const {
-	FUObjectExportContainer* Container = GetContainer();
-
-	if (Container == nullptr) return;
-
-	FNiagaraGraphStats Stats;
-
-	FNiagaraGraphs::Rebuild(Container, GetPackage(), GetPropertySerializer(), Stats);
-
-	if (Stats.Unpaired > 0) {
-		FImportIssues::Report(
-			EImportIssue::Data,
-			FString::Printf(TEXT("%d pin pairing(s) name a pin that isn't there"), Stats.Unpaired),
-			FString::Printf(
-				TEXT("'%s' has nodes that pair their own pins off and name one that didn't come across, so the node drops the pairing and whatever fed the pin stops reaching what it stood for."),
-				*GetAssetName())
-		);
-	}
-
-	const int32 Restored = FNiagaraCookedCache::Restore(Container);
-
+void FNiagaraEmitterRepair::Repair(FUObjectExportContainer* Container, UObject* Asset, const FString& Name,
+	const FNiagaraGraphStats& Stats, int32 Restored) {
 	/* Every version the emitter keeps, not only the one it says it is now.
 	 *
 	 * An emitter that has been revised keeps a copy of itself per revision, and its PostLoad goes
@@ -131,7 +113,7 @@ void INiagaraEmitterImporter::Repair(UObject* Asset) const {
 			TEXT("The emitter has nowhere to put what it is made of"),
 			FString::Printf(
 				TEXT("'%s' has no version list to fill, so its scripts, graph and renderers are in the package with nothing pointing at them."),
-				*GetAssetName())
+				*Name)
 		);
 
 		return;
@@ -266,19 +248,45 @@ void INiagaraEmitterImporter::Repair(UObject* Asset) const {
 			FString::Printf(TEXT("%d script(s) have nowhere to go"), Unplaced),
 			FString::Printf(
 				TEXT("'%s' holds scripts whose usage names no part of an emitter, so nothing runs them."),
-				*GetAssetName())
+				*Name)
 		);
 	}
 
 	UE_LOG(LogReflection, Display,
 		TEXT("\"%s\" put %d node(s) in their graphs, made %d pin(s) and joined %d of them%s, and hung %d script(s), %d renderer(s) and %d scratch pad(s)%s off %d version(s)%s"),
-		*GetAssetName(), Stats.Placed, Stats.Pins, Stats.Links,
+		*Name, Stats.Placed, Stats.Pins, Stats.Links,
 		Stats.Dangling > 0 ? *FString::Printf(TEXT(", %d reaching nothing"), Stats.Dangling) : TEXT(""),
 		Hung, Drawn, Pads,
 		Made > 0 ? *FString::Printf(TEXT(" with %d made for want of one, of %d in the package"), Made, ScratchPads.Num()) : TEXT(""),
 		Versions.Num(),
 		Restored > 0 ? *FString::Printf(TEXT(", and put %d field(s) back where the asset reads them"), Restored) : TEXT(""));
 }
+
+
+void INiagaraEmitterImporter::Repair(UObject* Asset) const {
+	FUObjectExportContainer* Container = GetContainer();
+
+	if (Container == nullptr) return;
+
+	FNiagaraGraphStats Stats;
+
+	FNiagaraGraphs::Rebuild(Container, GetPackage(), GetPropertySerializer(), Stats);
+
+	if (Stats.Unpaired > 0) {
+		FImportIssues::Report(
+			EImportIssue::Data,
+			FString::Printf(TEXT("%d pin pairing(s) name a pin that isn't there"), Stats.Unpaired),
+			FString::Printf(
+				TEXT("'%s' has nodes that pair their own pins off and name one that didn't come across, so the node drops the pairing and whatever fed the pin stops reaching what it stood for."),
+				*GetAssetName())
+		);
+	}
+
+	const int32 Restored = FNiagaraCookedCache::Restore(Container);
+
+	FNiagaraEmitterRepair::Repair(Container, Asset, GetAssetName(), Stats, Restored);
+}
+
 
 void INiagaraEmitterImporter::Validate(UObject* Asset) const {
 	const TArray<FNiagaraVersion> Versions = FNiagaraVersions::All(Asset);
