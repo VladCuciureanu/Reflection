@@ -11,6 +11,8 @@
 #include "NiagaraSystem.h"
 #include "NiagaraSystemImpl.h"
 #include "NiagaraScript.h"
+#include "NiagaraScriptSourceBase.h"
+#include "NiagaraEmitter.h"
 #include "NiagaraDataInterface.h"
 
 #include "UObject/UnrealType.h"
@@ -137,6 +139,50 @@ void INiagaraSystemImporter::Validate(UObject* Asset) const {
 			EImportIssue::Data,
 			FString::Printf(TEXT("%d emitter handle(s) name no emitter and were switched off"), Dropped),
 			FString::Printf(TEXT("'%s' has enabled handles whose emitter didn't come across; compiling with them in would crash, so they draw nothing."), *GetAssetName())
+		);
+	}
+
+	/* Every emitter in the package, the handles' and the ones nested inside them (NS_Emote_StarStray's
+	 * FN_DebugGnomon carries another FN_DebugGnomon), gets the four scripts its PostLoad walks without asking
+	 * whether they are there (FVersionedNiagaraEmitterData::GetScripts): the particle spawn and update scripts and
+	 * the editor-only emitter spawn and update ones a cook doesn't carry. One missing gets an empty script of its
+	 * usage on the version's source, which the editor compiles from the graph; saved without it, the emitter took
+	 * the editor down on its next load. */
+	int32 ScriptsMade = 0;
+
+	if (FUObjectExportContainer* EmitterContainer = GetContainer()) {
+		const TPair<ENiagaraScriptUsage, const TCHAR*> Required[] = {
+			{ ENiagaraScriptUsage::ParticleSpawnScript, TEXT("SpawnScriptProps") },
+			{ ENiagaraScriptUsage::ParticleUpdateScript, TEXT("UpdateScriptProps") },
+			{ ENiagaraScriptUsage::EmitterSpawnScript, TEXT("EmitterSpawnScriptProps") },
+			{ ENiagaraScriptUsage::EmitterUpdateScript, TEXT("EmitterUpdateScriptProps") },
+		};
+
+		for (FUObjectExport* Export : EmitterContainer->Exports) {
+			UNiagaraEmitter* Emitter = Cast<UNiagaraEmitter>(Export->Object);
+			if (Emitter == nullptr) continue;
+
+			for (const FNiagaraVersion& Version : FNiagaraVersions::All(Emitter)) {
+				for (const TPair<ENiagaraScriptUsage, const TCHAR*>& Slot : Required) {
+					if (FNiagaraVersions::GetObjectIn(Version, Slot.Value, TEXT("Script")) != nullptr) continue;
+
+					UNiagaraScript* Script = NewObject<UNiagaraScript>(Emitter, NAME_None, RF_Transactional);
+					Script->SetUsage(Slot.Key);
+					if (UNiagaraScriptSourceBase* Source = Cast<UNiagaraScriptSourceBase>(FNiagaraVersions::GetObject(Version, TEXT("GraphSource")))) {
+						Script->SetLatestSource(Source);
+					}
+
+					if (FNiagaraVersions::SetObjectIn(Version, Slot.Value, TEXT("Script"), Script)) ScriptsMade++;
+				}
+			}
+		}
+	}
+
+	if (ScriptsMade > 0) {
+		FImportIssues::Report(
+			EImportIssue::Data,
+			FString::Printf(TEXT("%d emitter script(s) were missing"), ScriptsMade),
+			FString::Printf(TEXT("'%s' has emitters without a spawn or update script the editor needs; each got an empty one compiled from its graph."), *GetAssetName())
 		);
 	}
 
