@@ -1,7 +1,7 @@
 /* Copyright Reflection Contributors 2024-2026 */
 
-#include "Sound/SoundCue.h"
 #include "Importers/Constructor/ImportReader.h"
+#include "Sound/SoundCue.h"
 
 #include "UObject/MetaData.h"
 
