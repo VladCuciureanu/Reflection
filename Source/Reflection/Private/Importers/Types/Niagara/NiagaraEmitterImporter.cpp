@@ -9,6 +9,8 @@
 #include "Engine/EngineUtilities.h"
 
 #include "NiagaraEmitter.h"
+#include "NiagaraScript.h"
+#include "NiagaraScriptSourceBase.h"
 
 #include "UObject/UnrealType.h"
 
@@ -153,6 +155,7 @@ void FNiagaraEmitterRepair::Repair(FUObjectExportContainer* Container, UObject* 
 	/* Taken in turn, so no two versions end up sharing one of something they each want */
 	int32 NextPad = 0;
 	int32 NextRenderer = 0;
+	int32 Filled = 0;
 	int32 NextEditorData = 0;
 	int32 NextEditorParameters = 0;
 
@@ -196,6 +199,28 @@ void FNiagaraEmitterRepair::Repair(FUObjectExportContainer* Container, UObject* 
 				: FNiagaraVersions::SetObjectIn(Version, *Field, *Inner, Script);
 
 			if (bSet) Hung++;
+		}
+
+		/* The four scripts an emitter's PostLoad walks without asking whether they are there
+		 * (FVersionedNiagaraEmitterData::GetScripts -> EnsureScriptsPostLoaded): the particle spawn and update
+		 * scripts, and the editor-only emitter spawn and update ones a cook doesn't carry. One with no script left
+		 * for it gets an empty one of its usage on the version's source, which the editor compiles from the graph;
+		 * a saved emitter missing one took the editor down on its next load (NS_Emote_StarStray). */
+		const TPair<ENiagaraScriptUsage, const TCHAR*> Required[] = {
+			{ ENiagaraScriptUsage::ParticleSpawnScript, TEXT("SpawnScriptProps") },
+			{ ENiagaraScriptUsage::ParticleUpdateScript, TEXT("UpdateScriptProps") },
+			{ ENiagaraScriptUsage::EmitterSpawnScript, TEXT("EmitterSpawnScriptProps") },
+			{ ENiagaraScriptUsage::EmitterUpdateScript, TEXT("EmitterUpdateScriptProps") },
+		};
+
+		for (const TPair<ENiagaraScriptUsage, const TCHAR*>& Slot : Required) {
+			if (FNiagaraVersions::GetObjectIn(Version, Slot.Value, TEXT("Script")) != nullptr) continue;
+
+			UNiagaraScript* Script = NewObject<UNiagaraScript>(Asset, NAME_None, RF_Transactional);
+			Script->SetUsage(Slot.Key);
+			if (UNiagaraScriptSourceBase* Source = Cast<UNiagaraScriptSourceBase>(Written)) Script->SetLatestSource(Source);
+
+			if (FNiagaraVersions::SetObjectIn(Version, Slot.Value, TEXT("Script"), Script)) Filled++;
 		}
 
 		if (FNiagaraVersions::GetObject(Version, TEXT("EditorData")) == nullptr && EditorData.IsValidIndex(NextEditorData)) {
@@ -242,6 +267,14 @@ void FNiagaraEmitterRepair::Repair(FUObjectExportContainer* Container, UObject* 
 
 			if (FNiagaraVersions::MakeObject(Version, Held, Asset) != nullptr) Made++;
 		}
+	}
+
+	if (Filled > 0) {
+		FImportIssues::Report(
+			EImportIssue::Data,
+			FString::Printf(TEXT("%d emitter script(s) were missing"), Filled),
+			FString::Printf(TEXT("'%s' had versions without a spawn or update script the editor needs; each got an empty one compiled from its graph."), *Name)
+		);
 	}
 
 	if (Unplaced > 0) {
