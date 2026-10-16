@@ -11,6 +11,7 @@
 #include "NiagaraSystem.h"
 #include "NiagaraSystemImpl.h"
 #include "NiagaraScript.h"
+#include "NiagaraDataInterface.h"
 
 #include "UObject/UnrealType.h"
 
@@ -116,6 +117,60 @@ void INiagaraSystemImporter::Validate(UObject* Asset) const {
 	UNiagaraSystem* System = Cast<UNiagaraSystem>(Asset);
 
 	if (System == nullptr) return;
+
+	/* A handle switched on with no emitter behind it (one that didn't come across) is switched off before
+	 * the compile: the compile reads every enabled handle's emitter (the attribute trim in
+	 * ComputeVMCompilationId) and takes the editor down on a null one. */
+	int32 Dropped = 0;
+
+	for (FNiagaraEmitterHandle& Handle : System->GetEmitterHandles()) {
+		const bool bStateless = Handle.GetEmitterMode() == ENiagaraEmitterMode::Stateless && Handle.GetStatelessEmitter() != nullptr;
+
+		if (Handle.GetIsEnabled() && Handle.GetInstance().Emitter == nullptr && !bStateless) {
+			Handle.SetIsEnabled(false, *System, false);
+			Dropped++;
+		}
+	}
+
+	if (Dropped > 0) {
+		FImportIssues::Report(
+			EImportIssue::Data,
+			FString::Printf(TEXT("%d emitter handle(s) name no emitter and were switched off"), Dropped),
+			FString::Printf(TEXT("'%s' has enabled handles whose emitter didn't come across; compiling with them in would crash, so they draw nothing."), *GetAssetName())
+		);
+	}
+
+	/* A data-interface input node whose interface didn't come across gets a default one of the type it
+	 * declares, as the editor gives a new input. The compile collects every such input's interface and
+	 * calls into it (the attribute trim), and a null one takes the editor down: FN_ImpactMajor_Burst_Baseline
+	 * has them. Read and set through reflection, since the node's accessors aren't exported. */
+	int32 Filled = 0;
+
+	if (FUObjectExportContainer* Container = GetContainer()) {
+		for (FUObjectExport* Export : Container->Exports) {
+			UObject* Node = Export->Object;
+			if (Node == nullptr || Node->GetClass()->GetName() != TEXT("NiagaraNodeInput")) continue;
+
+			const FObjectProperty* Held = FindFProperty<FObjectProperty>(Node->GetClass(), TEXT("DataInterface"));
+			const FStructProperty* Declared = FindFProperty<FStructProperty>(Node->GetClass(), TEXT("Input"));
+			if (Held == nullptr || Declared == nullptr || Held->GetObjectPropertyValue_InContainer(Node) != nullptr) continue;
+
+			const FNiagaraVariable* Variable = Declared->ContainerPtrToValuePtr<FNiagaraVariable>(Node);
+			UClass* Class = Variable->GetType().GetClass();
+			if (Class == nullptr || !Class->IsChildOf(UNiagaraDataInterface::StaticClass()) || Class->HasAnyClassFlags(CLASS_Abstract)) continue;
+
+			Held->SetObjectPropertyValue_InContainer(Node, NewObject<UNiagaraDataInterface>(Node, Class, NAME_None, RF_Transactional));
+			Filled++;
+		}
+	}
+
+	if (Filled > 0) {
+		FImportIssues::Report(
+			EImportIssue::Data,
+			FString::Printf(TEXT("%d data interface input(s) came without their interface"), Filled),
+			FString::Printf(TEXT("'%s' has data interface inputs whose interface didn't come across; each got a default one of its type, so what it was set up with is lost."), *GetAssetName())
+		);
+	}
 
 	/* Compiled from the graphs now, so the system is ready to run once it is saved rather than
 	 * compiling the first time something spawns it */
