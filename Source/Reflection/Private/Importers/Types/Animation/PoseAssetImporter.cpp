@@ -252,8 +252,11 @@ void IPoseAssetImporter::ReverseCookLocalSpacePose(USkeleton* Skeleton) {
 		CleanName = GetAssetName() + "_Pose_Export";
 	}
 
+	/* The name can be taken by a package made earlier in this import and not yet saved (the head mesh the pose asset
+	 * is named after: M_MED_TeddyPermit_Head_PoseAsset), which the disk check misses and which a sequence of the same
+	 * name can't replace. */
 	const FString PotentialAnimSequencePath = ParentPath / CleanName;
-	if (FPackageName::DoesPackageExist(PotentialAnimSequencePath)) {
+	if (FPackageName::DoesPackageExist(PotentialAnimSequencePath) || FindPackage(nullptr, *PotentialAnimSequencePath) != nullptr) {
 		CleanName = GetAssetName() + "_Pose_Export";
 	}
 	
