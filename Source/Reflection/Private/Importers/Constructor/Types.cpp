@@ -40,6 +40,14 @@ TMap<FString, TArray<FString>> ImportTypes::Templated = {
 		}
 	},
 	{
+		/* A MetaSound keeps its whole graph in its document property, which reads like any other */
+		TEXT("MetaSound Assets"),
+		{
+			TEXT("MetaSoundSource"),
+			TEXT("MetaSoundPatch"),
+		}
+	},
+	{
 		TEXT("Landscape Assets"),
 		{
 			TEXT("LandscapeGrassType"),
