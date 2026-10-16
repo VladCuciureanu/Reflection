@@ -1234,7 +1234,9 @@ void FRigVMGraphReconstruction::CreateNodes() {
 		}
 
 		for (const TPair<FString, int32>& ArraySize : ArraySizes) {
-			if (const URigVMPin* ArrayPin = Node.Node->FindPin(ArraySize.Key)) {
+			/* An output array (ArrayClone's Clone) gets its elements when the VM runs; the controller refuses to
+			 * insert any under it ("Cannot insert array pin under ..."), so only inputs are grown. */
+			if (const URigVMPin* ArrayPin = Node.Node->FindPin(ArraySize.Key); ArrayPin && ArrayPin->GetDirection() != ERigVMPinDirection::Output) {
 				GraphController->SetArrayPinSize(ArrayPin->GetPinPath(), ArraySize.Value, FString(), false, false);
 			}
 		}
@@ -1249,8 +1251,9 @@ bool FRigVMGraphReconstruction::SetPinDefault(URigVMPin* Pin, const TSharedPtr<F
 	if (Value->Type == EJson::Array) {
 		const TArray<TSharedPtr<FJsonValue>>& Elements = Value->AsArray();
 
-		/* A register can hold an array where the pin this engine build declares holds one value */
-		if (!Pin->IsArray()) {
+		/* A register can hold an array where the pin this engine build declares holds one value; an output
+		 * array's elements are the VM's to make, not a default */
+		if (!Pin->IsArray() || Pin->GetDirection() == ERigVMPinDirection::Output) {
 			return false;
 		}
 
