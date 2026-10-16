@@ -2,6 +2,9 @@
 
 #include "Serializers/ObjectSerializer.h"
 #include "Engine/Package.h"
+#include "Modules/Cloud/Cloud.h"
+#include "Animation/AnimNotifies/AnimNotifyState.h"
+#include "Animation/AnimNotifies/AnimNotify.h"
 
 #include "Animation/AnimNodeBase.h"
 #include "Animation/WidgetAnimation.h"
@@ -197,6 +200,87 @@ namespace {
 
 		Export->Object = NewObject<UObject>(ObjectOuter, ToNewObjectClass(Class), Named, Flags);
 	}
+
+	/* The nearest class this engine has above one it doesn't, for an anim notify.
+	 *
+	 * Fortnite's emotes carry their effects in notifies of its own classes: Blueprints such as
+	 * FN_TimedNiagaraNotify, on native ones such as FortAnimNotifyState_TimedNiagaraEffectVariant, on the
+	 * engine's AnimNotifyState_TimedNiagaraEffect. Neither of the first two is here, so the notify came out
+	 * as nothing and its effect never played. Made as the engine class it is built on, it keeps what that
+	 * class reads (Template, SocketName, offsets) and plays the way the engine plays it.
+	 *
+	 * A Blueprint's parent comes from its class export, a native class's from the mappings (the Cloud's
+	 * schema). Only notifies are given a stand-in: anything else missing stays missing, and is reported
+	 * where it always was. */
+	UClass* NotifyStandIn(const FString& Type, const FString& ClassReference) {
+		static TMap<FString, UClass*> Found;
+		if (UClass** Cached = Found.Find(Type)) return *Cached;
+
+		UClass* Result = nullptr;
+		FString Current = Type;
+		FString Reference = ClassReference;
+
+		for (int32 Step = 0; Step < 12 && !Current.IsEmpty(); ++Step) {
+			if (UClass* Class = FindClassByType(Current)) {
+				/* An abstract base (a notify that only does what its Blueprint adds) has nothing of its own to play */
+				if ((Class->IsChildOf(UAnimNotify::StaticClass()) || Class->IsChildOf(UAnimNotifyState::StaticClass())) && !Class->HasAnyClassFlags(CLASS_Abstract)) Result = Class;
+				break;
+			}
+
+			FString Super;
+			FString SuperReference;
+
+			/* BlueprintGeneratedClass'/Game/X/Name.Name_C': the package's class export names its parent */
+			FString Inner;
+			if (Reference.Split(TEXT("'"), nullptr, &Inner) && Inner.EndsWith(TEXT("'"))) {
+				Inner.LeftChopInline(1);
+				FString Package;
+				Inner.Split(TEXT("."), &Package, nullptr, ESearchCase::CaseSensitive, ESearchDir::FromEnd);
+
+				const TSharedPtr<FJsonObject> Response = Package.IsEmpty() ? nullptr : Cloud::Export::GetRawBlocking(Package);
+				const TArray<TSharedPtr<FJsonValue>>* Exports = nullptr;
+
+				if (Response.IsValid() && Response->TryGetArrayField(TEXT("exports"), Exports)) {
+					for (const TSharedPtr<FJsonValue>& Value : *Exports) {
+						const TSharedPtr<FJsonObject> One = Value->AsObject();
+						FString OneType, OneName;
+						if (!One.IsValid() || !One->TryGetStringField(TEXT("Type"), OneType) || !OneType.EndsWith(TEXT("BlueprintGeneratedClass"))) continue;
+						if (!One->TryGetStringField(TEXT("Name"), OneName) || OneName != Current) continue;
+
+						const TSharedPtr<FJsonObject>* Parent = nullptr;
+						if (!One->TryGetObjectField(TEXT("SuperStruct"), Parent)) break;
+
+						FString ParentName = (*Parent)->GetStringField(TEXT("ObjectName"));
+						FString ParentKind;
+						ParentName.Split(TEXT("'"), &ParentKind, &ParentName);
+						ParentName.LeftChopInline(1);
+						ParentName.Split(TEXT(":"), nullptr, &ParentName);
+
+						const FString ParentPath = (*Parent)->GetStringField(TEXT("ObjectPath"));
+						Super = ParentName;
+
+						if (!ParentPath.StartsWith(TEXT("/Script/"))) {
+							FString ParentPackage;
+							ParentPath.Split(TEXT("."), &ParentPackage, nullptr, ESearchCase::CaseSensitive, ESearchDir::FromEnd);
+							SuperReference = ParentKind + TEXT("'") + ParentPackage + TEXT(".") + ParentName + TEXT("'");
+						}
+						break;
+					}
+				}
+			} else {
+				/* A native class: its parent from the mappings */
+				const TSharedPtr<FJsonObject> Schema = Cloud::GetBlocking(TEXT("/api/schema"), { { TEXT("type"), Current } });
+				if (Schema.IsValid()) Schema->TryGetStringField(TEXT("super"), Super);
+			}
+
+			Current = Super;
+			Reference = SuperReference;
+		}
+
+		Found.Add(Type, Result);
+		if (Result) UE_LOG(LogReflection, Display, TEXT("%s is made as %s, the nearest class this engine has"), *Type, *Result->GetName());
+		return Result;
+	}
 }
 
 UObject* UObjectSerializer::SpawnExport(FUObjectExport* Export, const bool bOnlySerialize) {
@@ -224,6 +308,13 @@ UObject* UObjectSerializer::SpawnExport(FUObjectExport* Export, const bool bOnly
 	}
 
 	const UClass* Class = GetClassToMake(Export);
+
+	/* A notify of a class only the game has */
+	if (!Class) {
+		FString Reference;
+		Export->JsonObject->TryGetStringField(TEXT("Class"), Reference);
+		Class = NotifyStandIn(Export->GetType().ToString(), Reference);
+	}
 
 	if (!Class) return nullptr;
 
@@ -462,6 +553,11 @@ void UObjectSerializer::DeserializeExport(FUObjectExport* Export, TMap<TSharedPt
 	
 	if (!Class) {
 		Class = FindClassByType(Type);
+	}
+
+	/* A notify of a class only the game has */
+	if (!Class) {
+		Class = NotifyStandIn(Type, ExportObject->GetStringField(TEXT("Class")));
 	}
 
 	if (!Class) return;
