@@ -140,6 +140,68 @@ void INiagaraSystemImporter::Validate(UObject* Asset) const {
 		);
 	}
 
+	/* A stateless emitter's disabled modules are cooked out as nulls (UNiagaraStatelessEmitter::Serialize trims them),
+	 * and a cooked load puts the template's module class back in each slot; an editor load doesn't, and the compile then
+	 * reads the null (UNiagaraStatelessEmitter::CacheFromCompiledData -> IsModuleEnabled) and takes the editor down:
+	 * NS_Emote_BriskReign_Ice has 21 of 25 such slots. Fortnite's template also has one module more than 5.7's (its
+	 * SolveVelocitiesAndForces is the 10th of 25, 5.7's the 9th of 24), so the slots don't line up by index. The modules
+	 * are rebuilt in 5.7's template order as UNiagaraStatelessEmitter does when its template changes: each class keeps
+	 * the module the emitter has of it, and a class it has none of gets one switched off, as the cook found it. Read and
+	 * set through reflection, since the stateless types are internal to Niagara. */
+	int32 Restored = 0;
+
+	for (FNiagaraEmitterHandle& Handle : System->GetEmitterHandles()) {
+		UObject* Stateless = reinterpret_cast<UObject*>(Handle.GetStatelessEmitter());
+		if (Stateless == nullptr) continue;
+
+		const FArrayProperty* Modules = FindFProperty<FArrayProperty>(Stateless->GetClass(), TEXT("Modules"));
+		const FObjectProperty* TemplateProperty = FindFProperty<FObjectProperty>(Stateless->GetClass(), TEXT("EmitterTemplate"));
+		UObject* Template = TemplateProperty ? TemplateProperty->GetObjectPropertyValue_InContainer(Stateless) : nullptr;
+		const FArrayProperty* Classes = Template ? FindFProperty<FArrayProperty>(Template->GetClass(), TEXT("Modules")) : nullptr;
+		const FObjectPropertyBase* ModuleElement = Modules ? CastField<FObjectPropertyBase>(Modules->Inner) : nullptr;
+		const FObjectPropertyBase* ClassElement = Classes ? CastField<FObjectPropertyBase>(Classes->Inner) : nullptr;
+		if (ModuleElement == nullptr || ClassElement == nullptr) continue;
+
+		FScriptArrayHelper ModuleArray(Modules, Modules->ContainerPtrToValuePtr<void>(Stateless));
+		FScriptArrayHelper ClassArray(Classes, Classes->ContainerPtrToValuePtr<void>(Template));
+
+		TArray<UObject*> Existing;
+		for (int32 Index = 0; Index < ModuleArray.Num(); ++Index) {
+			if (UObject* Module = ModuleElement->GetObjectPropertyValue(ModuleArray.GetRawPtr(Index))) Existing.Add(Module);
+		}
+
+		TArray<UObject*> Rebuilt;
+		for (int32 Index = 0; Index < ClassArray.Num(); ++Index) {
+			UClass* ModuleClass = Cast<UClass>(ClassElement->GetObjectPropertyValue(ClassArray.GetRawPtr(Index)));
+			if (ModuleClass == nullptr) { Rebuilt.Add(nullptr); continue; }
+
+			UObject* const* Kept = Existing.FindByPredicate([ModuleClass](const UObject* Module) { return Module->GetClass() == ModuleClass; });
+			if (Kept) { Rebuilt.Add(*Kept); continue; }
+
+			UObject* Module = NewObject<UObject>(Stateless, ModuleClass, NAME_None, RF_Transactional);
+			if (const FBoolProperty* Enabled = FindFProperty<FBoolProperty>(ModuleClass, TEXT("bModuleEnabled"))) {
+				Enabled->SetPropertyValue_InContainer(Module, false);
+			}
+			Rebuilt.Add(Module);
+			Restored++;
+		}
+
+		const bool bChanged = Rebuilt.Num() != ModuleArray.Num() || Rebuilt.ContainsByPredicate([&](const UObject* Module) { return Module == nullptr; })
+			|| Existing.Num() != ModuleArray.Num();
+		if (!bChanged) continue;
+
+		ModuleArray.Resize(Rebuilt.Num());
+		for (int32 Index = 0; Index < Rebuilt.Num(); ++Index) ModuleElement->SetObjectPropertyValue(ModuleArray.GetRawPtr(Index), Rebuilt[Index]);
+	}
+
+	if (Restored > 0) {
+		FImportIssues::Report(
+			EImportIssue::Data,
+			FString::Printf(TEXT("%d stateless module(s) were cooked out"), Restored),
+			FString::Printf(TEXT("'%s' has stateless emitters whose disabled modules the cook left empty; their modules were rebuilt in the template's order, the missing ones switched off."), *GetAssetName())
+		);
+	}
+
 	/* A data-interface input node whose interface didn't come across gets a default one of the type it
 	 * declares, as the editor gives a new input. The compile collects every such input's interface and
 	 * calls into it (the attribute trim), and a null one takes the editor down: FN_ImpactMajor_Burst_Baseline
