@@ -3,6 +3,7 @@
 #include "SchemaDumpCommandlet.h"
 
 #include "Misc/FileHelper.h"
+#include "Runtime/Launch/Resources/Version.h"
 #include "Serialization/JsonSerializer.h"
 #include "Policies/CondensedJsonPrintPolicy.h"
 #include "UObject/UnrealType.h"
@@ -95,6 +96,16 @@ int32 USchemaDumpCommandlet::Main(const FString& Params) {
 	}
 
 	const TSharedPtr<FJsonObject> Root = MakeShared<FJsonObject>();
+
+	/* Which engine wrote it. A schema only describes the engine it came from, and whatever reads it
+	 * (Reflection Core's EngineSchema) refuses one that doesn't say. */
+	{
+		TSharedPtr<FJsonObject> Engine = MakeShared<FJsonObject>();
+		Engine->SetNumberField(TEXT("Major"), ENGINE_MAJOR_VERSION);
+		Engine->SetNumberField(TEXT("Minor"), ENGINE_MINOR_VERSION);
+		Engine->SetNumberField(TEXT("Patch"), ENGINE_PATCH_VERSION);
+		Root->SetObjectField(TEXT("$Engine"), Engine);
+	}
 
 	int32 Classes = 0;
 	int32 Structs = 0;
