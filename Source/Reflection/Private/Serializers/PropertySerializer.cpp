@@ -1,6 +1,7 @@
 /* Copyright Reflection Contributors 2024-2026 */
 
 #include "Serializers/PropertySerializer.h"
+#include "UObject/PropertyOptional.h"
 
 #include "GameplayTagContainer.h"
 #include "Importers/Constructor/Importer.h"
@@ -948,8 +949,21 @@ void UPropertySerializer::DeserializePropertyValue(FProperty* Property, const TS
 		*static_cast<FFieldPath*>(OutValue) = FieldPath;
 	}
 #endif
+#if UE5_4_BEYOND
+	/* An optional (TOptional in a struct, 5.4's FOptionalProperty): unset where the export has nothing, else its value */
+	else if (const FOptionalProperty* OptionalProperty = CastField<const FOptionalProperty>(Property)) {
+		if (NewJsonValue->IsNull()) {
+			OptionalProperty->MarkUnset(OutValue);
+		} else {
+			void* Inner = OptionalProperty->MarkSetAndGetInitializedValuePointerToReplace(OutValue);
+			DeserializePropertyValue(OptionalProperty->GetValueProperty(), NewJsonValue, Inner);
+		}
+	}
+#endif
 	else {
-		UE_LOG(LogReflectionPropertySerializer, Fatal, TEXT("Found unsupported property type when deserializing value: %s"), *Property->GetClass()->GetName());
+		/* Said rather than fatal: one value this can't read isn't worth the editor (DistantEchoPilot's loadout
+		 * met an OptionalProperty before it had a branch) */
+		UE_LOG(LogReflectionPropertySerializer, Error, TEXT("Found unsupported property type when deserializing value: %s"), *Property->GetClass()->GetName());
 	}
 }
 
