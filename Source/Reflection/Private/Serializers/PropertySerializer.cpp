@@ -561,8 +561,19 @@ void UPropertySerializer::DeserializePropertyValue(FProperty* Property, const TS
 				ObjectIndex = FCString::Atoi(*ObjectIndexString);
 			}
 
+			/* A reference into a subobject ("Package:Outer.Name") names the object it sits under, and a namesake under
+			 * another one isn't it: NS_Emote_StarStray's FN_DebugGnomon names a SpawnScript the cook didn't carry, which
+			 * this found under Anticipation_Square, so both emitters shared it and the gnomon's PostLoad turned it back
+			 * to the plain spawn usage the interpolating Anticipation_Square can't run. */
+			FString NamedOuter;
+			if (ObjectOuter.Contains(":")) {
+				ObjectOuter.Split(":", nullptr, &NamedOuter, ESearchCase::CaseSensitive, ESearchDir::FromEnd);
+				NamedOuter.Split(".", nullptr, &NamedOuter, ESearchCase::CaseSensitive, ESearchDir::FromEnd);
+			}
+
 			if (ExportsContainer) {
-				if (FUObjectExport* Export = ExportsContainer->Find(ObjectName); Export->IsJsonValid() && Export->Object != nullptr) {
+				if (FUObjectExport* Export = ExportsContainer->Find(ObjectName); Export->IsJsonValid() && Export->Object != nullptr
+					&& (NamedOuter.IsEmpty() || Export->GetOuter() == FName(*NamedOuter))) {
 					if (UObject* FoundObject = Export->Object) {
 						SetObjectPropertyValueChecked(ObjectProperty, OutValue, FoundObject);
 					}
