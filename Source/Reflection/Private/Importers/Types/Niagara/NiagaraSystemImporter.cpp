@@ -180,6 +180,19 @@ void INiagaraSystemImporter::Validate(UObject* Asset) const {
 
 					if (FNiagaraVersions::SetObjectIn(Version, Slot.Value, TEXT("Script"), Script)) ScriptsMade++;
 				}
+
+				/* And the GPU compute script the editor gives every emitter version (FN_ImpactMajor_Burst_Baseline's
+				 * Fireworks_Mesh_1 names one the cook left out): a GPU emitter's compile walks it, and took the editor
+				 * down on a null one. */
+				if (FNiagaraVersions::GetObject(Version, TEXT("GPUComputeScript")) == nullptr) {
+					UNiagaraScript* Script = NewObject<UNiagaraScript>(Emitter, NAME_None, RF_Transactional);
+					Script->SetUsage(ENiagaraScriptUsage::ParticleGPUComputeScript);
+					if (UNiagaraScriptSourceBase* Source = Cast<UNiagaraScriptSourceBase>(FNiagaraVersions::GetObject(Version, TEXT("GraphSource")))) {
+						Script->SetLatestSource(Source);
+					}
+
+					if (FNiagaraVersions::SetObject(Version, TEXT("GPUComputeScript"), Script)) ScriptsMade++;
+				}
 			}
 		}
 	}
