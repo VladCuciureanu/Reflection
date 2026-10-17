@@ -150,6 +150,10 @@ void INiagaraSystemImporter::Validate(UObject* Asset) const {
 	 * the editor down on its next load. */
 	int32 ScriptsMade = 0;
 
+	/* A renderer the cook left out (FN_DebugGnomon's, debug only) is an empty entry, which a cooked package may have
+	 * and the editor's PostLoad takes out with an ensure for any other: it goes here instead. */
+	int32 RenderersDropped = 0;
+
 	if (FUObjectExportContainer* EmitterContainer = GetContainer()) {
 		const TPair<ENiagaraScriptUsage, const TCHAR*> Required[] = {
 			{ ENiagaraScriptUsage::ParticleSpawnScript, TEXT("SpawnScriptProps") },
@@ -163,6 +167,8 @@ void INiagaraSystemImporter::Validate(UObject* Asset) const {
 			if (Emitter == nullptr) continue;
 
 			for (const FNiagaraVersion& Version : FNiagaraVersions::All(Emitter)) {
+				RenderersDropped += FNiagaraVersions::RemoveNulls(Version, TEXT("RendererProperties"));
+
 				for (const TPair<ENiagaraScriptUsage, const TCHAR*>& Slot : Required) {
 					if (FNiagaraVersions::GetObjectIn(Version, Slot.Value, TEXT("Script")) != nullptr) continue;
 
@@ -176,6 +182,14 @@ void INiagaraSystemImporter::Validate(UObject* Asset) const {
 				}
 			}
 		}
+	}
+
+	if (RenderersDropped > 0) {
+		FImportIssues::Report(
+			EImportIssue::Data,
+			FString::Printf(TEXT("%d emitter renderer(s) didn't come across"), RenderersDropped),
+			FString::Printf(TEXT("'%s' has emitters with renderers the cook left out; they were taken out of the list."), *GetAssetName())
+		);
 	}
 
 	if (ScriptsMade > 0) {

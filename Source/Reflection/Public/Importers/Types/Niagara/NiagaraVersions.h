@@ -50,6 +50,9 @@ public:
 
 	static int32 SetObjects(const FNiagaraVersion& Version, const TCHAR* Field, const TArray<UObject*>& Values);
 
+	/* Takes the empty entries out of a list on the version, and says how many there were */
+	static int32 RemoveNulls(const FNiagaraVersion& Version, const TCHAR* Field);
+
 	/* Something the version is expected to carry that no export ever wrote.
 	 *
 	 * Part of what a version holds is the asset's own bookkeeping, made as it makes the version
