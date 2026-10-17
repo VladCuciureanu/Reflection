@@ -18,6 +18,7 @@
 #include "K2Node_FunctionEntry.h"
 #include "K2Node_FunctionResult.h"
 #include "K2Node_Event.h"
+#include "K2Node_CallParentFunction.h"
 #include "K2Node_ExecutionSequence.h"
 #include "K2Node_IfThenElse.h"
 #include "Kismet2/BlueprintEditorUtils.h"
@@ -2112,6 +2113,17 @@ UK2Node* FBytecodeGraph::PlaceCall(const FUObjectJsonValueExport& Expression, UE
 			Adding->TemplateType = Kind;
 
 			Node = Adding;
+		}
+	}
+
+	/* A Blueprint calls an event virtually; called non-virtually it is the parent's version, which is the editor's
+	 * "Parent: ..." node (an actor's construction script and BeginPlay calling Actor's). Read back as a plain call
+	 * it is one to an event, which the compiler refuses, and the function compiles to nothing. */
+	if (Node == nullptr && Function->HasAnyFunctionFlags(FUNC_BlueprintEvent) && Expression.Has(TEXT("Token"))) {
+		const FString Token = Expression.GetString(TEXT("Token"));
+
+		if (Token == TEXT("EX_LocalFinalFunction") || Token == TEXT("EX_FinalFunction")) {
+			Node = AddNode<UK2Node_CallParentFunction>();
 		}
 	}
 
