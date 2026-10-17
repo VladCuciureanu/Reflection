@@ -19,7 +19,10 @@
 #include "RigVMModel/Nodes/RigVMVariableNode.h"
 
 #include "Engine/Log.h"
+#include "Internationalization/Regex.h"
 #include "Serializers/PropertySerializer.h"
+#include "StructUtils/UserDefinedStruct.h"
+#include "UObject/UObjectIterator.h"
 
 namespace {
 	/* The registry grew a read and a write half in 5.5, but the half it hands out keeps the
@@ -78,6 +81,39 @@ namespace {
 #else
 		return Function->GetArgumentNameForOperandIndex(OperandIndex, OperandCount);
 #endif
+	}
+
+	/* A type as the bytecode spells it (TArray<FName>, FUserDefinedStruct_2C641F3D47D778912879BE98B68E1D07): the
+	 * registry's, or a user-defined struct's by the GUID RigVM names it after, which the registry only knows once
+	 * something registered it. False for a type neither knows. */
+	bool ResolveTypeString(const FString& TypeString, FString& OutCPPType, UObject*& OutObject) {
+		const auto& Registry = GetRigVMRegistry();
+		const TRigVMTypeIndex TypeIndex = Registry.GetTypeIndexFromCPPType(TypeString);
+
+		if (TypeIndex != INDEX_NONE) {
+			const FRigVMTemplateArgumentType& Type = Registry.GetType(TypeIndex);
+			OutCPPType = Type.CPPType.ToString();
+			OutObject = Type.CPPTypeObject;
+			return true;
+		}
+
+		static const FRegexPattern UserStruct(TEXT("FUserDefinedStruct_([0-9A-F]{32})"));
+		FRegexMatcher Matcher(UserStruct, TypeString);
+
+		if (!Matcher.FindNext()) return false;
+
+		const FString Guid = Matcher.GetCaptureGroup(1);
+
+		for (TObjectIterator<UUserDefinedStruct> It; It; ++It) {
+			if (It->GetOutermost() == GetTransientPackage() || It->Guid.ToString(EGuidFormats::Digits) != Guid) continue;
+
+			const FString Base = RigVMTypeUtils::GetUniqueStructTypeName(*It);
+			OutCPPType = TypeString.StartsWith(TEXT("TArray<")) ? RigVMTypeUtils::ArrayTypeFromBaseType(Base) : Base;
+			OutObject = *It;
+			return true;
+		}
+
+		return false;
 	}
 
 	/* Opcodes are one enum with every deprecated per-operand execute in front of them, so the ones
@@ -293,6 +329,12 @@ void FRigVMGraphReconstruction::ReadMemory(const FUObjectJsonValueExport& Virtua
 				Register.Value = Property.JsonObject->TryGetField(TEXT("Tag"));
 			}
 
+			const TSharedPtr<FJsonObject>* TagData = nullptr;
+
+			if (Property.JsonObject->TryGetObjectField(TEXT("TagData"), TagData)) {
+				Register.TagData = *TagData;
+			}
+
 			OutRegisters.Add(Register);
 		}
 	};
@@ -454,9 +496,18 @@ void FRigVMGraphReconstruction::ExposeArguments() {
 			FString CPPType;
 			UObject* CPPTypeObject = nullptr;
 
-			/* What the argument is comes from the pins inside the function that read or write it,
-			 * which are the engine's own spelling of the type */
+			/* What the argument is: the bytecode's own spelling of it, when the registry knows the type by it.
+			 * (A pin reading it can be a type-blind copy whose recorded resolution is wrong: ChorusPunt's
+			 * createFKCtrl clones its TArray<FName> JointNames through an ArrayClone recorded as TArray<bool>.) */
+			if (!Argument.TypeString.IsEmpty() && !ResolveTypeString(Argument.TypeString, CPPType, CPPTypeObject)) {
+				CPPType.Reset();
+				CPPTypeObject = nullptr;
+			}
+
+			/* Otherwise from the pins inside the function that read or write it, which are the engine's own
+			 * spelling of the type */
 			for (const FNode& Node : Nodes) {
+				if (!CPPType.IsEmpty()) break;
 				if (Node.Callable != CallableIndex || Node.Node == nullptr) continue;
 
 				for (int32 OperandIndex = 0; OperandIndex < Node.Operands.Num() && CPPType.IsEmpty(); ++OperandIndex) {
@@ -474,19 +525,6 @@ void FRigVMGraphReconstruction::ExposeArguments() {
 				}
 
 				if (!CPPType.IsEmpty()) break;
-			}
-
-			/* Nothing inside reads it as a pin, copies into a struct's fields being how that
-			 * happens: the bytecode's own spelling, when the registry knows the type by it */
-			if (CPPType.IsEmpty() && !Argument.TypeString.IsEmpty()) {
-				const TRigVMTypeIndex TypeIndex = Registry.GetTypeIndexFromCPPType(Argument.TypeString);
-
-				if (TypeIndex != INDEX_NONE) {
-					const FRigVMTemplateArgumentType& Type = Registry.GetType(TypeIndex);
-
-					CPPType = Type.CPPType.ToString();
-					CPPTypeObject = Type.CPPTypeObject;
-				}
 			}
 
 			if (CPPType.IsEmpty()) {
@@ -643,6 +681,38 @@ FString FRigVMGraphReconstruction::GetSegmentPath(const int32 MemoryType, const 
 	const TArray<FString>& PropertyPaths = MemoryType == MemoryTypeLiteral ? LiteralPropertyPaths : WorkPropertyPaths;
 
 	return PropertyPaths.IsValidIndex(RegisterOffset) ? PropertyPaths[RegisterOffset] : FString();
+}
+
+/* The CPP type a register's property holds (TArray<FName> for an ArrayProperty of NameProperty), or nothing for
+ * one this doesn't spell */
+FString FRigVMGraphReconstruction::RegisterCPPType(const FRegister& Register) {
+	auto Spell = [](const TSharedPtr<FJsonObject>& Tag, auto& Self) -> FString {
+		if (!Tag.IsValid()) return FString();
+
+		const FString Type = Tag->GetStringField(TEXT("Type"));
+
+		static const TMap<FString, FString> Plain = {
+			{ TEXT("BoolProperty"), TEXT("bool") }, { TEXT("IntProperty"), TEXT("int32") }, { TEXT("FloatProperty"), TEXT("float") },
+			{ TEXT("DoubleProperty"), TEXT("double") }, { TEXT("NameProperty"), TEXT("FName") }, { TEXT("StrProperty"), TEXT("FString") },
+		};
+
+		if (const FString* Known = Plain.Find(Type)) return *Known;
+
+		if (Type == TEXT("StructProperty")) {
+			FString Struct;
+			return Tag->TryGetStringField(TEXT("StructType"), Struct) && !Struct.IsEmpty() ? TEXT("F") + Struct : FString();
+		}
+
+		if (Type == TEXT("ArrayProperty")) {
+			const TSharedPtr<FJsonObject>* Inner = nullptr;
+			const FString Element = Tag->TryGetObjectField(TEXT("InnerTypeData"), Inner) ? Self(*Inner, Self) : FString();
+			return Element.IsEmpty() ? FString() : FString::Printf(TEXT("TArray<%s>"), *Element);
+		}
+
+		return FString();
+	};
+
+	return Spell(Register.TagData, Spell);
 }
 
 FRigVMGraphReconstruction::FRegister* FRigVMGraphReconstruction::FindRegister(const int32 MemoryType, const int32 RegisterIndex) {
@@ -1229,6 +1299,40 @@ void FRigVMGraphReconstruction::CreateNodes() {
 			const TArray<FRigVMFunctionArgument>& Arguments = Node.Function->GetArguments();
 			const TArray<TRigVMTypeIndex>& TypeIndices = Node.Function->GetArgumentTypeIndices();
 
+			/* A clone copies memory without looking at it, and the cook can record it under any array type
+			 * (ChorusPunt's TArray<FName> local set through an ArrayClone recorded as TArray<bool>): its type is
+			 * the one the registers it copies hold */
+			TOptional<FRigVMTemplateArgumentType> CloneType;
+
+			if (Node.Function->Factory->GetFactoryName().ToString().Contains(TEXT("ArrayClone"))) {
+				for (const TPair<int32, int32>& Operand : Node.Operands) {
+					if (Operand.Key != MemoryTypeWork) continue;
+
+					/* A function argument it copies says its type outright (an array of a user-defined struct,
+					 * which the register's property can't name); otherwise the register's property */
+					FString CPPType;
+
+					if (Callables.IsValidIndex(Node.Callable)) {
+						for (const FCallableArgument& Argument : Callables[Node.Callable].Arguments) {
+							if (Operand.Value == Argument.InterfaceRegister || Operand.Value == Argument.ForwardedRegister) CPPType = Argument.TypeString;
+						}
+					}
+
+					if (CPPType.IsEmpty()) {
+						const FRegister* Register = FindRegister(MemoryTypeWork, Operand.Value);
+						CPPType = Register != nullptr ? RegisterCPPType(*Register) : FString();
+					}
+
+					FString Resolved;
+					UObject* ResolvedObject = nullptr;
+
+					if (CPPType.StartsWith(TEXT("TArray<")) && ResolveTypeString(CPPType, Resolved, ResolvedObject)) {
+						CloneType = FRigVMTemplateArgumentType(FName(*Resolved), ResolvedObject);
+						break;
+					}
+				}
+			}
+
 			for (int32 ArgumentIndex = 0; ArgumentIndex < Arguments.Num(); ++ArgumentIndex) {
 				if (!TypeIndices.IsValidIndex(ArgumentIndex)) continue;
 
@@ -1236,7 +1340,7 @@ void FRigVMGraphReconstruction::CreateNodes() {
 
 				if (Pin == nullptr || !Pin->IsWildCard()) continue;
 
-				GraphController->ResolveWildCardPin(Pin, Registry.GetType(TypeIndices[ArgumentIndex]), false, false);
+				GraphController->ResolveWildCardPin(Pin, CloneType.IsSet() ? CloneType.GetValue() : Registry.GetType(TypeIndices[ArgumentIndex]), false, false);
 			}
 		}
 

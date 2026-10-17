@@ -30,6 +30,8 @@ private:
 
 	/* The graph, read back out of the RigVM the rig's nodes were compiled into */
 	void ConstructGraph(UControlRigBlueprint* Blueprint) const;
+	/* The user-defined structs the rig's package references, reflected (or loaded) before its graph is built */
+	int32 ReflectUserStructs() const;
 
 	/* The preview mesh and shape libraries, which sit on the blueprint rather than the hierarchy */
 	void ConstructSettings(UControlRigBlueprint* Blueprint) const;
