@@ -280,6 +280,24 @@ void FNiagaraGraphs::Rebuild(FUObjectExportContainer* Container, UPackage* Packa
 
 		if (Call == nullptr) continue;
 
+#if !ENGINE_UE4
+		/* A call keeps the version of the module it was made against, and a cook keeps only the module's exposed
+		 * version: the call then names one its script doesn't have, and every walk into it trips GetSource's ensure
+		 * and finds nothing. A cooked game runs the exposed version, so the call is pointed at that one (or at the
+		 * script's only version). */
+		if (UNiagaraScript* Script = Call->FunctionScript; Script != nullptr && Script->GetAllAvailableVersions().Num() > 0
+			&& Script->GetScriptData(Call->SelectedScriptVersion) == nullptr) {
+			const FGuid Exposed = Script->GetExposedVersion().VersionGuid;
+			const FGuid Kept = Script->GetScriptData(Exposed) != nullptr ? Exposed : Script->GetAllAvailableVersions()[0].VersionGuid;
+
+			if (Script->GetScriptData(Kept) != nullptr) {
+				UE_LOG(LogReflection, Display, TEXT("\"%s\" calls version %s of \"%s\", which it doesn't carry: it calls %s"),
+					*Call->GetName(), *Call->SelectedScriptVersion.ToString(), *Script->GetName(), *Kept.ToString());
+				const_cast<UNiagaraNodeFunctionCall*>(Call)->SelectedScriptVersion = Kept;
+			}
+		}
+#endif
+
 		const UNiagaraGraph* Called = CalledGraphOf(Call);
 
 		/* A call naming nothing is one the engine leaves alone */

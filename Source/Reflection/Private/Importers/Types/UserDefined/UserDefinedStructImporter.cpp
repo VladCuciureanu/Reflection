@@ -4,6 +4,7 @@
 
 #include "UserDefinedStructure/UserDefinedStructEditorData.h"
 #include "Kismet2/StructureEditorUtils.h"
+#include "Kismet2/BlueprintEditorUtils.h"
 #include "UObject/StructOnScope.h"
 #include "Utilities/JsonHelpers.h"
 #include "Internationalization/Regex.h"
@@ -258,10 +259,15 @@ void IUserDefinedStructImporter::ApplyDefaultValues(UUserDefinedStruct* UserDefi
         void* PropertyValue = Property->ContainerPtrToValuePtr<void>(DefaultInstance.GetStructMemory());
         GetPropertySerializer()->DeserializePropertyValue(Property, DefaultValue->ToSharedRef(), PropertyValue);
 
-        /* Get the default value as a string */
+        /* The default as a pin default, which is what the struct's compile reads it back as: a transform, vector or
+         * rotator member's is the Blueprint form ("0,0,8|0,0,0|0.7,1,1"), and export text there doesn't parse, which
+         * left FortDeformRig's FN_DeformRig_Part_Value errored, saved without its default instance, and every class
+         * holding one ensuring on load. */
         FString ExportedValue;
 #if UE5_1_BEYOND
-        Property->ExportTextItem_Direct(ExportedValue, PropertyValue, nullptr, UserDefinedStruct, 0);
+        if (!FBlueprintEditorUtils::PropertyValueToString_Direct(Property, static_cast<const uint8*>(PropertyValue), ExportedValue, UserDefinedStruct)) {
+            Property->ExportTextItem_Direct(ExportedValue, PropertyValue, nullptr, UserDefinedStruct, 0);
+        }
 #else
         Property->ExportText_Direct(ExportedValue, PropertyValue, nullptr, UserDefinedStruct, 0);
 #endif
