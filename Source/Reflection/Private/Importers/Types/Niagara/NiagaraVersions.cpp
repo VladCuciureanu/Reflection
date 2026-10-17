@@ -176,6 +176,29 @@ UObject* FNiagaraVersions::MakeObject(const FNiagaraVersion& Version, const TCHA
 	return Made;
 }
 
+int32 FNiagaraVersions::RemoveNulls(const FNiagaraVersion& Version, const TCHAR* Field) {
+	if (!Version.IsValid()) return 0;
+
+	FArrayProperty* Listed = FindFProperty<FArrayProperty>(Version.Struct, Field);
+
+	FObjectProperty* Named = Listed != nullptr ? CastField<FObjectProperty>(Listed->Inner) : nullptr;
+
+	if (Named == nullptr) return 0;
+
+	FScriptArrayHelper Held(Listed, Listed->ContainerPtrToValuePtr<void>(Version.Data));
+
+	int32 Removed = 0;
+
+	for (int32 Index = Held.Num() - 1; Index >= 0; --Index) {
+		if (Named->GetObjectPropertyValue(Held.GetRawPtr(Index)) != nullptr) continue;
+
+		Held.RemoveValues(Index, 1);
+		Removed++;
+	}
+
+	return Removed;
+}
+
 int32 FNiagaraVersions::SetObjects(const FNiagaraVersion& Version, const TCHAR* Field, const TArray<UObject*>& Values) {
 	if (!Version.IsValid() || Values.Num() == 0) return 0;
 
