@@ -9,6 +9,7 @@
 #include "Engine/EngineUtilities.h"
 
 #include "NiagaraSystem.h"
+#include "NiagaraRibbonRendererProperties.h"
 #include "NiagaraSystemImpl.h"
 #include "NiagaraScript.h"
 #include "NiagaraScriptSourceBase.h"
@@ -195,6 +196,42 @@ void INiagaraSystemImporter::Validate(UObject* Asset) const {
 				}
 			}
 		}
+	}
+
+	/* A ribbon's UV settings that came across out of range (NS_Emote_TotalFlock_Slash_Kick_Ribbon's read back as distribution
+	 * mode 209 and edge mode MAX) stop the renderer on an assertion the moment the ribbon draws ("Unsupported ribbon uv edge
+	 * mode"). The values aren't the game's, so the settings go back to their defaults. */
+	int32 RibbonUVsReset = 0;
+
+	if (FUObjectExportContainer* RibbonContainer = GetContainer()) {
+		for (const FUObjectExport* Export : RibbonContainer->Exports) {
+			UNiagaraRibbonRendererProperties* Ribbon = Cast<UNiagaraRibbonRendererProperties>(Export->Object);
+			if (Ribbon == nullptr) continue;
+
+			const UNiagaraRibbonRendererProperties* Defaults = GetDefault<UNiagaraRibbonRendererProperties>();
+
+			for (const TPair<FNiagaraRibbonUVSettings*, const FNiagaraRibbonUVSettings*> Pair : {
+				TPair<FNiagaraRibbonUVSettings*, const FNiagaraRibbonUVSettings*>(&Ribbon->UV0Settings, &Defaults->UV0Settings),
+				TPair<FNiagaraRibbonUVSettings*, const FNiagaraRibbonUVSettings*>(&Ribbon->UV1Settings, &Defaults->UV1Settings) }) {
+				FNiagaraRibbonUVSettings* Settings = Pair.Key;
+				const bool bValid = static_cast<uint8>(Settings->DistributionMode) <= static_cast<uint8>(ENiagaraRibbonUVDistributionMode::TiledFromStartOverRibbonLength)
+					&& static_cast<uint8>(Settings->LeadingEdgeMode) <= static_cast<uint8>(ENiagaraRibbonUVEdgeMode::Locked)
+					&& static_cast<uint8>(Settings->TrailingEdgeMode) <= static_cast<uint8>(ENiagaraRibbonUVEdgeMode::Locked);
+
+				if (bValid) continue;
+
+				*Settings = *Pair.Value;
+				RibbonUVsReset++;
+			}
+		}
+	}
+
+	if (RibbonUVsReset > 0) {
+		FImportIssues::Report(
+			EImportIssue::Data,
+			FString::Printf(TEXT("%d ribbon UV setting(s) came across out of range"), RibbonUVsReset),
+			FString::Printf(TEXT("'%s' has ribbon renderers whose UV distribution or edge modes aren't values the engine has; they were reset to the defaults."), *GetAssetName())
+		);
 	}
 
 	if (RenderersDropped > 0) {
