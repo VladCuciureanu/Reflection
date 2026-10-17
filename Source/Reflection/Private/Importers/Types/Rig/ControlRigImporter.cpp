@@ -189,6 +189,11 @@ bool IControlRigImporter::Import() {
 		ApplyVariableDefaults(Blueprint);
 	}
 
+	/* A function argument or array of a user-defined struct is named in the bytecode only by the struct's
+	 * GUID (FUserDefinedStruct_2C64...), which the graph can type only once the struct exists: ChorusPunt's
+	 * FK helpers take /Game/Animation/Libraries structs that nothing else made */
+	ReflectUserStructs();
+
 	ConstructGraph(Blueprint);
 
 	/* The hierarchy is edited on the blueprint, and every rig built from it holds a copy of its
@@ -555,6 +560,56 @@ void IControlRigImporter::ConstructGraph(UControlRigBlueprint* Blueprint) const 
 			FString::Printf(TEXT("%d nodes and %d links the graph refused."), Stats.FailedNodes, Stats.FailedLinks)
 		);
 	}
+}
+
+int32 IControlRigImporter::ReflectUserStructs() const {
+	TMap<FString, FString> Structs;
+
+	TFunction<void(const TSharedPtr<FJsonValue>&)> Walk = [&Structs, &Walk](const TSharedPtr<FJsonValue>& Value) {
+		if (!Value.IsValid()) return;
+
+		if (Value->Type == EJson::Array) {
+			for (const TSharedPtr<FJsonValue>& Item : Value->AsArray()) Walk(Item);
+			return;
+		}
+
+		if (Value->Type != EJson::Object) return;
+
+		const TSharedPtr<FJsonObject> Object = Value->AsObject();
+		FString ObjectName;
+		FString ObjectPath;
+
+		if (Object->TryGetStringField(TEXT("ObjectName"), ObjectName) && Object->TryGetStringField(TEXT("ObjectPath"), ObjectPath)
+			&& ObjectName.StartsWith(TEXT("UserDefinedStruct'"))) {
+			FString Name = ObjectName.Mid(18);
+			Name.RemoveFromEnd(TEXT("'"));
+			FString Package;
+
+			if (ObjectPath.Split(TEXT("."), &Package, nullptr, ESearchCase::CaseSensitive, ESearchDir::FromEnd)) Structs.Add(Package, Name);
+
+			return;
+		}
+
+		for (const TPair<FString, TSharedPtr<FJsonValue>>& Field : Object->Values) Walk(Field.Value);
+	};
+
+	for (const FUObjectExport* Export : GetContainer()->Exports) {
+		if (Export->IsJsonValid()) Walk(MakeShared<FJsonValueObject>(Export->JsonObject));
+	}
+
+	int32 Ready = 0;
+
+	for (const TPair<FString, FString>& Struct : Structs) {
+		TObjectPtr<UObject> Existing = LoadObjectByPath<UObject>(ToEditorPackagePath(Struct.Key) + TEXT(".") + Struct.Value);
+
+		if (Existing == nullptr) {
+			Existing = DownloadWrapper(Existing, TEXT("UserDefinedStruct"), Struct.Value, Struct.Key);
+		}
+
+		if (Existing != nullptr) Ready++;
+	}
+
+	return Ready;
 }
 
 void IControlRigImporter::ConstructSettings(UControlRigBlueprint* Blueprint) const {

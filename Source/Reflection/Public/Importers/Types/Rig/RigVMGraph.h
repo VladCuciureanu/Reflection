@@ -88,6 +88,9 @@ private:
 		FString Name;
 		TSharedPtr<FJsonValue> Value;
 
+		/* The property the memory holds it in (TagData: ArrayProperty of NameProperty), which says its type */
+		TSharedPtr<FJsonObject> TagData;
+
 		/* The node and pin the register is named after, once an instruction has claimed it */
 		int32 Owner = INDEX_NONE;
 		FString OwnerPin;
@@ -212,6 +215,7 @@ private:
 	void CreateExecution(const TArray<FUObjectJsonValueExport>& Instructions, const FUObjectJsonValueExport& ByteCode);
 
 	/* The register a memory type and index name, or null when the export doesn't have one */
+	static FString RegisterCPPType(const FRegister& Register);
 	FRegister* FindRegister(int32 MemoryType, int32 RegisterIndex);
 
 	/* Reads the node name out of a register named after one of its pins. False when the register
