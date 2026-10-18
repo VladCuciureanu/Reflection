@@ -10,7 +10,9 @@
 
 class UControlRigBlueprint;
 
-/* Rebuilds a Control Rig from a cooked ControlRigBlueprintGeneratedClass.
+/* Rebuilds a Control Rig from a cooked ControlRigBlueprintGeneratedClass, or from the RigVMBlueprintGeneratedClass
+ * newer cooks write for one (its super is ControlRig; the VM's memory comes as RigVMMemoryStorageGeneratorClass
+ * exports beside it, while the VM still carries the memory descriptions the graph is read from).
  *
  * A cooked rig carries its hierarchy and the RigVM its graph was compiled into, and nothing of the
  * graph itself: the nodes, their links and their pin defaults are editor data the cook drops. What
@@ -40,8 +42,9 @@ private:
 	void ApplyVariableDefaults(const UControlRigBlueprint* Blueprint) const;
 };
 
-REGISTER_IMPORTER(IControlRigImporter, {
-	TEXT("ControlRigBlueprintGeneratedClass")
-}, "Animation Assets");
+REGISTER_IMPORTER(IControlRigImporter, (TArray<FString>{
+	TEXT("ControlRigBlueprintGeneratedClass"),
+	TEXT("RigVMBlueprintGeneratedClass")
+}), "Animation Assets");
 
 #endif

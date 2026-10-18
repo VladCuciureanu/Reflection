@@ -143,6 +143,25 @@ UObject* IControlRigImporter::CreateAsset(UObject* CreatedAsset) {
 
 	UClass* ParentClass = GetAssetClass();
 
+	/* A RigVMBlueprintGeneratedClass is any RigVM host's, and only a rig's is built here: one whose parent is a known
+	 * class outside ControlRig is something else (a parent this project lacks is reported below, as for any rig) */
+	if (GetAssetExport()->GetStringField(TEXT("Type")) == TEXT("RigVMBlueprintGeneratedClass")) {
+		const TSharedPtr<FJsonObject>* Super = nullptr;
+		FString SuperName;
+		if (GetAssetExport()->TryGetObjectField(TEXT("SuperStruct"), Super)) (*Super)->TryGetStringField(TEXT("ObjectName"), SuperName);
+		SuperName.Split(TEXT("'"), nullptr, &SuperName);
+		SuperName.RemoveFromEnd(TEXT("'"));
+		const UClass* SuperClass = FindFirstObject<UClass>(*SuperName, EFindFirstObjectOptions::ExactClass);
+		if (SuperClass != nullptr && !SuperClass->IsChildOf(UControlRig::StaticClass())) {
+			FImportIssues::Report(
+				EImportIssue::MissingClass,
+				TEXT("Not a Control Rig"),
+				FString::Printf(TEXT("A RigVM class built on '%s', which isn't a Control Rig."), *SuperName)
+			);
+			return nullptr;
+		}
+	}
+
 	/* A rig built on a class of the game's own is one this project doesn't have. The rest of the
 	 * asset has nothing to do with that class, so it is built on the one every rig derives from
 	 * and the missing parent is reported rather than failing the import. */
