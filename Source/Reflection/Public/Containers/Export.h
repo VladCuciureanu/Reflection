@@ -215,6 +215,17 @@ struct REFLECTION_API FUObjectExport : FUObjectJsonValueExport {
 		return FName(*StripObjectOuter(OuterObject->GetStringField(TEXT("ObjectName"))));
 	}
 
+	/* The export's whole path as a reference writes it after the class (Package:Outer.Name), with '.' and ':' alike */
+	FString GetWholePath() const {
+		FString Whole = GetOuterTree().ToString();
+
+		if (!JsonObject.IsValid() || JsonObject->HasField(TEXT("ObjectName"))) return Whole.Replace(TEXT("."), TEXT(":"));
+
+		Whole = Whole.IsEmpty() ? GetName().ToString() : Whole + TEXT(":") + GetName().ToString();
+
+		return Whole.Replace(TEXT("."), TEXT(":"));
+	}
+
 	TArray<FName> GetOuterTreeSegments(const bool bRemoveLast = false) const {
 		TArray<FName> Result;
 

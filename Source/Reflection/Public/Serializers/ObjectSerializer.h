@@ -39,6 +39,13 @@ public:
 
     UPROPERTY()
     TMap<FString, UObject*> ConstructedObjects;
+    /* The same, by the export they were made for: a name can stand for more than one export */
+    TMap<TSharedPtr<FJsonObject>, UObject*> ConstructedByExport;
+
+    /* The export an export's Outer reference names (its whole path, else its number), or the empty one */
+    FUObjectExport* OuterExportOf(const TSharedPtr<FJsonObject>& ExportObject) const;
+    /* Whether the export's Outer names a nested path (below an object of the package) that no export is */
+    bool NamesMissingNestedOuter(const TSharedPtr<FJsonObject>& ExportObject) const;
     
     UPROPERTY()
     UPropertySerializer* PropertySerializer;
