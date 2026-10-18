@@ -17,4 +17,9 @@ class REFLECTION_API FNiagaraEmitterRepair {
 public:
 	static void Repair(FUObjectExportContainer* Container, UObject* Emitter, const FString& Name,
 		const FNiagaraGraphStats& Stats, int32 Restored);
+
+	/* Takes out of each of the emitter's versions the simulation stages that are nothing or have no script, returns
+	 * how many. A parent's copy names stages and scripts the cook kept only under the emitter made from it, and
+	 * every load of it ensures on such an entry; it plays nothing of them. */
+	static int32 DropScriptlessStages(UObject* Emitter);
 };
