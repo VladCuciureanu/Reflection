@@ -317,6 +317,13 @@ void FRigVMGraphReconstruction::ReadMemory(const FUObjectJsonValueExport& Virtua
 
 	ReadStorage(VirtualMachine.GetObject(TEXT("DefaultWorkMemoryStorage")), Work, WorkPropertyPaths);
 	ReadStorage(VirtualMachine.GetObject(TEXT("LiteralMemoryStorage")), Literals, LiteralPropertyPaths);
+
+	/* The VM keeps the paths into the rig's variables itself: a copy into part of one names its offset here */
+	if (VirtualMachine.Has(TEXT("ExternalPropertyPathDescriptions"))) {
+		for (const FUObjectJsonValueExport& PropertyPath : VirtualMachine.GetArray(TEXT("ExternalPropertyPathDescriptions"))) {
+			ExternalPropertyPaths.Add(PropertyPath.Has(TEXT("SegmentPath")) ? PropertyPath.GetString(TEXT("SegmentPath")) : FString());
+		}
+	}
 }
 
 void FRigVMGraphReconstruction::ReadCallables(const FUObjectJsonValueExport& ByteCode) {
@@ -654,7 +661,8 @@ FString FRigVMGraphReconstruction::GetSegmentPath(const int32 MemoryType, const 
 		return FString();
 	}
 
-	const TArray<FString>& PropertyPaths = MemoryType == MemoryTypeLiteral ? LiteralPropertyPaths : WorkPropertyPaths;
+	const TArray<FString>& PropertyPaths = MemoryType == MemoryTypeLiteral ? LiteralPropertyPaths
+		: MemoryType == MemoryTypeExternal ? ExternalPropertyPaths : WorkPropertyPaths;
 
 	return PropertyPaths.IsValidIndex(RegisterOffset) ? PropertyPaths[RegisterOffset] : FString();
 }
@@ -1270,8 +1278,15 @@ void FRigVMGraphReconstruction::CreateNodes() {
 
 		/* A dispatch node comes in as the template it is, with its pins still wildcards. The
 		 * function the instruction named is one resolution of that template, and its argument
-		 * types are what the pins were resolved to when the rig was compiled. */
-		if (Node.Function->Factory != nullptr) {
+		 * types are what the pins were resolved to when the rig was compiled. A unit whose struct
+		 * belongs to a template of units sharing its notation comes in the same way
+		 * (FRigVMFunction_MathVectorUnit as Unit::Execute(in Value, out Result), CreamSkull_Dove's
+		 * head_vector), and its pins take the same types: left as wildcards, a vector's component
+		 * was linked where the vector was meant. */
+		bool bWildCards = false;
+		for (const URigVMPin* Pin : Node.Node->GetPins()) bWildCards |= Pin->IsWildCard();
+
+		if (Node.Function->Factory != nullptr || bWildCards) {
 			const TArray<FRigVMFunctionArgument>& Arguments = Node.Function->GetArguments();
 			const TArray<TRigVMTypeIndex>& TypeIndices = Node.Function->GetArgumentTypeIndices();
 
@@ -1280,7 +1295,7 @@ void FRigVMGraphReconstruction::CreateNodes() {
 			 * the one the registers it copies hold */
 			TOptional<FRigVMTemplateArgumentType> CloneType;
 
-			if (Node.Function->Factory->GetFactoryName().ToString().Contains(TEXT("ArrayClone"))) {
+			if (Node.Function->Factory != nullptr && Node.Function->Factory->GetFactoryName().ToString().Contains(TEXT("ArrayClone"))) {
 				for (const TPair<int32, int32>& Operand : Node.Operands) {
 					if (Operand.Key != MemoryTypeWork) continue;
 
@@ -1317,6 +1332,26 @@ void FRigVMGraphReconstruction::CreateNodes() {
 				if (Pin == nullptr || !Pin->IsWildCard()) continue;
 
 				GraphController->ResolveWildCardPin(Pin, CloneType.IsSet() ? CloneType.GetValue() : Registry.GetType(TypeIndices[ArgumentIndex]), false, false);
+			}
+
+			/* A unit's function carries no argument types of its own: its pins are its struct's properties, typed
+			 * as the struct declares them */
+			if (Node.Function->Struct != nullptr) {
+				for (URigVMPin* Pin : Node.Node->GetPins()) {
+					if (!Pin->IsWildCard()) continue;
+
+					const FProperty* Property = Node.Function->Struct->FindPropertyByName(Pin->GetFName());
+					if (Property == nullptr) continue;
+
+					FString ExtendedType;
+					const FString CPPType = Property->GetCPPType(&ExtendedType) + ExtendedType;
+					FString Resolved;
+					UObject* ResolvedObject = nullptr;
+
+					if (ResolveTypeString(CPPType, Resolved, ResolvedObject)) {
+						GraphController->ResolveWildCardPin(Pin, FRigVMTemplateArgumentType(FName(*Resolved), ResolvedObject), false, false);
+					}
+				}
 			}
 		}
 
@@ -2003,6 +2038,9 @@ void FRigVMGraphReconstruction::CreateVariableSetters(const TArray<FUObjectJsonV
 		}
 	}
 
+	/* The variable register the last partial copy wrote, the instruction it was and the set node it went into */
+	TOptional<TTuple<int32, TTuple<int32, int32>>> PartialSetter;
+
 	for (int32 Index = 0; Index < Instructions.Num(); ++Index) {
 		const FUObjectJsonValueExport& Instruction = Instructions[Index];
 
@@ -2030,6 +2068,14 @@ void FRigVMGraphReconstruction::CreateVariableSetters(const TArray<FUObjectJsonV
 
 		if (Variable == nullptr) continue;
 
+		/* Copies into parts of one variable, one after another (X, Y and Z of a vector), fill in one set node */
+		if (Target.GetInteger(TEXT("RegisterOffset"), NoRegisterOffset) != NoRegisterOffset && PartialSetter.IsSet()
+			&& PartialSetter->Key == TargetIndex && PartialSetter->Value.Key == Index - 1) {
+			InstructionToNode.Add(Index, PartialSetter->Value.Value);
+			PartialSetter->Value.Key = Index;
+			continue;
+		}
+
 		URigVMNode* Setter = GetController(FindCallable(Index))->AddVariableNode(
 			Variable->Name,
 			Variable->CPPType,
@@ -2052,7 +2098,14 @@ void FRigVMGraphReconstruction::CreateVariableSetters(const TArray<FUObjectJsonV
 		SetterNode.Name = Setter->GetName();
 		SetterNode.Node = Setter;
 
-		InstructionToNode.Add(Index, Nodes.Add(SetterNode));
+		const int32 SetterIndex = Nodes.Add(SetterNode);
+		InstructionToNode.Add(Index, SetterIndex);
+
+		if (Target.GetInteger(TEXT("RegisterOffset"), NoRegisterOffset) != NoRegisterOffset) {
+			PartialSetter = MakeTuple(TargetIndex, MakeTuple(Index, SetterIndex));
+		} else {
+			PartialSetter.Reset();
+		}
 	}
 }
 
@@ -2197,7 +2250,7 @@ void FRigVMGraphReconstruction::CreateLinks(const TArray<FUObjectJsonValueExport
 			const int32* SetterIndex = InstructionToNode.Find(Index);
 
 			if (SetterIndex != nullptr && SourceRegister != nullptr && SourceRegister->Owner != INDEX_NONE) {
-				Link(SourceRegister->Owner, WithSegment(SourceRegister->OwnerPin, SourceSegment), *SetterIndex, TEXT("Value"));
+				Link(SourceRegister->Owner, WithSegment(SourceRegister->OwnerPin, SourceSegment), *SetterIndex, WithSegment(TEXT("Value"), TargetSegment));
 			}
 
 			continue;
