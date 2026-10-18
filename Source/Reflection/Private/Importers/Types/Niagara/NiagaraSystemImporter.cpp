@@ -111,6 +111,17 @@ void INiagaraSystemImporter::Repair(UObject* Asset) const {
 		FNiagaraEmitterRepair::Repair(Container, Emitter, Emitter->GetName(), Stats, Restored);
 	}
 
+	/* And every emitter's stages, the parents' copies under them included, which nothing else repairs */
+	int32 Unstaged = 0;
+
+	for (FUObjectExport* Export : Container->Exports) {
+		if (Export->Object != nullptr && Export->GetType() == TEXT("NiagaraEmitter")) Unstaged += FNiagaraEmitterRepair::DropScriptlessStages(Export->Object);
+	}
+
+	if (Unstaged > 0) {
+		UE_LOG(LogReflection, Display, TEXT("\"%s\" left out %d simulation stage(s) with no script"), *GetAssetName(), Unstaged);
+	}
+
 	UE_LOG(LogReflection, Display,
 		TEXT("\"%s\" put %d node(s) in their graphs, made %d pin(s) and joined %d of them, gave %d system script(s) their source, and repaired %d emitter(s)"),
 		*GetAssetName(), Stats.Placed, Stats.Pins, Stats.Links, Sourced, Emitters.Num());
