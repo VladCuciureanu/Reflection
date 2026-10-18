@@ -256,6 +256,7 @@ private:
 	 * one field of a struct rather than the whole of it */
 	TArray<FString> WorkPropertyPaths;
 	TArray<FString> LiteralPropertyPaths;
+	TArray<FString> ExternalPropertyPaths;
 
 	TArray<FNode> Nodes;
 	TMap<int32, int32> InstructionToNode;
