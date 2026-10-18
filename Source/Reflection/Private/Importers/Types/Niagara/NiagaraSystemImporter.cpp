@@ -356,7 +356,11 @@ void INiagaraSystemImporter::Validate(UObject* Asset) const {
 	}
 
 	/* Compiled from the graphs now, so the system is ready to run once it is saved rather than
-	 * compiling the first time something spawns it */
+	 * compiling the first time something spawns it. A loaded system has been through
+	 * UpdateSystemAfterLoad before anything compiles it; one built here hadn't, so its first save
+	 * ran it after the compile, and on 5.8 that walk (into CacheFromCompiledData) read freed memory
+	 * and took the editor down. It goes first here, as a load does. */
+	System->EnsureFullyLoaded();
 	System->RequestCompile(true);
 	System->WaitForCompilationComplete(true, false);
 
