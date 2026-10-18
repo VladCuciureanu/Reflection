@@ -44,7 +44,8 @@ private:
 
 REGISTER_IMPORTER(IControlRigImporter, (TArray<FString>{
 	TEXT("ControlRigBlueprintGeneratedClass"),
-	TEXT("RigVMBlueprintGeneratedClass")
+	TEXT("RigVMBlueprintGeneratedClass"),
+	TEXT("ControlRigRuntimeAsset")
 }), "Animation Assets");
 
 #endif

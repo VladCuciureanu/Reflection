@@ -135,6 +135,66 @@ namespace {
 	};
 }
 
+/* A ControlRigRuntimeAsset (Fortnite ships its newer rigs as these: F_MED_FeelUnionSki_CtrlRig) carries what a rig
+ * class's default object does, its hierarchy and the VM its graph was compiled into, on the asset itself, with its
+ * variables in a property bag rather than as properties of a class. It is rebuilt as a rig Blueprint at the same path,
+ * which a ControlRig anim node runs through its BlueprintRigClass. */
+static bool IsRuntimeAsset(const TSharedPtr<FJsonObject>& AssetExport) {
+	return AssetExport.IsValid() && AssetExport->GetStringField(TEXT("Type")) == TEXT("ControlRigRuntimeAsset");
+}
+
+/* A property bag's variables (FInstancedPropertyBag's PropertyDescs) as the class properties FBlueprintVariables
+ * declares Blueprint variables from: the value type names the property, ValueTypeObject its struct, enum or class,
+ * and an array container wraps it as an ArrayProperty's Inner. */
+static TArray<TSharedPtr<FJsonValue>> DeclaredFromPropertyBag(const TSharedPtr<FJsonObject>& Bag) {
+	TArray<TSharedPtr<FJsonValue>> Declared;
+	const TArray<TSharedPtr<FJsonValue>>* Descs = nullptr;
+	if (!Bag.IsValid() || !Bag->TryGetArrayField(TEXT("PropertyDescs"), Descs)) return Declared;
+
+	static const TMap<FString, FString> Types = {
+		{TEXT("Bool"), TEXT("BoolProperty")}, {TEXT("Byte"), TEXT("ByteProperty")}, {TEXT("Int32"), TEXT("IntProperty")},
+		{TEXT("Int64"), TEXT("Int64Property")}, {TEXT("Float"), TEXT("FloatProperty")}, {TEXT("Double"), TEXT("DoubleProperty")},
+		{TEXT("Name"), TEXT("NameProperty")}, {TEXT("String"), TEXT("StrProperty")}, {TEXT("Text"), TEXT("TextProperty")},
+		{TEXT("Enum"), TEXT("EnumProperty")}, {TEXT("Struct"), TEXT("StructProperty")}, {TEXT("Object"), TEXT("ObjectProperty")},
+		{TEXT("SoftObject"), TEXT("SoftObjectProperty")}, {TEXT("Class"), TEXT("ClassProperty")},
+		{TEXT("SoftClass"), TEXT("SoftClassProperty")}, {TEXT("UInt32"), TEXT("UInt32Property")}, {TEXT("UInt64"), TEXT("UInt64Property")},
+	};
+	static const TMap<FString, FString> TypeObjectFields = {
+		{TEXT("Enum"), TEXT("Enum")}, {TEXT("Struct"), TEXT("Struct")}, {TEXT("Object"), TEXT("PropertyClass")},
+		{TEXT("SoftObject"), TEXT("PropertyClass")}, {TEXT("Class"), TEXT("MetaClass")}, {TEXT("SoftClass"), TEXT("MetaClass")},
+	};
+
+	for (const TSharedPtr<FJsonValue>& Value : *Descs) {
+		const TSharedPtr<FJsonObject> Desc = Value.IsValid() ? Value->AsObject() : nullptr;
+		FString Name, ValueType, ContainerType;
+		if (!Desc.IsValid() || !Desc->TryGetStringField(TEXT("Name"), Name) || !Desc->TryGetStringField(TEXT("ValueType"), ValueType)) continue;
+		ValueType.Split(TEXT("::"), nullptr, &ValueType);
+		const FString* Type = Types.Find(ValueType);
+		if (Type == nullptr) continue;
+
+		const TSharedPtr<FJsonObject> Property = MakeShared<FJsonObject>();
+		Property->SetStringField(TEXT("Name"), Name);
+		Property->SetStringField(TEXT("Type"), *Type);
+		const TSharedPtr<FJsonObject>* TypeObject = nullptr;
+		if (const FString* Field = TypeObjectFields.Find(ValueType); Field && Desc->TryGetObjectField(TEXT("ValueTypeObject"), TypeObject)) {
+			Property->SetObjectField(*Field, *TypeObject);
+		}
+
+		Desc->TryGetStringField(TEXT("ContainerType"), ContainerType);
+		if (ContainerType.EndsWith(TEXT("::Array"))) {
+			const TSharedPtr<FJsonObject> Array = MakeShared<FJsonObject>();
+			Array->SetStringField(TEXT("Name"), Name);
+			Array->SetStringField(TEXT("Type"), TEXT("ArrayProperty"));
+			Array->SetObjectField(TEXT("Inner"), Property);
+			Declared.Add(MakeShared<FJsonValueObject>(Array));
+		} else {
+			Declared.Add(MakeShared<FJsonValueObject>(Property));
+		}
+	}
+
+	return Declared;
+}
+
 UObject* IControlRigImporter::CreateAsset(UObject* CreatedAsset) {
 	/* Reflected over an earlier run: the asset is already there, and the import rebuilds it in
 	 * place rather than creating a second one beside it */
@@ -142,7 +202,8 @@ UObject* IControlRigImporter::CreateAsset(UObject* CreatedAsset) {
 		return IImporter::CreateAsset(ExistingBlueprint);
 	}
 
-	UClass* ParentClass = GetAssetClass();
+	/* A runtime asset has no class of its own to build on: every rig derives from ControlRig */
+	UClass* ParentClass = IsRuntimeAsset(GetAssetExport()) ? UControlRig::StaticClass() : GetAssetClass();
 
 	/* A RigVMBlueprintGeneratedClass is any RigVM host's, and only a rig's is built here: one whose parent is a known
 	 * class outside ControlRig is something else (a parent this project lacks is reported below, as for any rig) */
@@ -467,6 +528,12 @@ int32 IControlRigImporter::ConstructHierarchy(UControlRigBlueprint* Blueprint) c
 }
 
 int32 IControlRigImporter::ConstructVariables(UControlRigBlueprint* Blueprint) {
+	if (IsRuntimeAsset(GetAssetExport())) {
+		const TSharedPtr<FJsonObject>* Bag = nullptr;
+		GetAssetData()->TryGetObjectField(TEXT("Variables"), Bag);
+		return FBlueprintVariables::Construct(Blueprint, DeclaredFromPropertyBag(Bag ? *Bag : nullptr));
+	}
+
 	/* A rig that declared nothing of its own declares nothing here either */
 	return FBlueprintVariables::Construct(Blueprint, FBlueprintVariables::GetDeclared(GetAssetExport(), GetContainer()));
 }
@@ -657,11 +724,13 @@ void IControlRigImporter::ConstructSettings(UControlRigBlueprint* Blueprint) con
 
 #if WITH_EDITORONLY_DATA
 	/* The libraries the shape names on the rig's controls are looked up in. A rig created from
-	 * scratch starts with the engine's own, which is what most rigs are still on. */
+	 * scratch starts with the engine's own, which is what most rigs are still on. They are on the class default
+	 * object, or on a runtime asset itself. */
 	FUObjectExport* DefaultObjectExport = GetClassDefaultObject(GetContainer(), GetAssetDataAsValue());
+	const bool bRuntimeAsset = IsRuntimeAsset(const_cast<IControlRigImporter*>(this)->GetAssetExport());
 
-	if (DefaultObjectExport->IsJsonValid() && DefaultObjectExport->JsonObject->HasField(TEXT("Properties"))) {
-		const FUObjectJsonValueExport Properties = DefaultObjectExport->GetPropertiesAsValue();
+	if (bRuntimeAsset || (DefaultObjectExport->IsJsonValid() && DefaultObjectExport->JsonObject->HasField(TEXT("Properties")))) {
+		const FUObjectJsonValueExport Properties = bRuntimeAsset ? GetAssetDataAsValue() : DefaultObjectExport->GetPropertiesAsValue();
 
 		if (Properties.Has(TEXT("ShapeLibraries"))) {
 			TArray<TSoftObjectPtr<UControlRigShapeLibrary>> ShapeLibraries;
@@ -686,6 +755,25 @@ void IControlRigImporter::ConstructSettings(UControlRigBlueprint* Blueprint) con
 void IControlRigImporter::ApplyVariableDefaults(const UControlRigBlueprint* Blueprint) const {
 	UClass* GeneratedClass = Blueprint->GeneratedClass;
 	if (GeneratedClass == nullptr) return;
+
+	/* A runtime asset's defaults are its property bag's values (the bag's tagged Properties) */
+	if (IsRuntimeAsset(const_cast<IControlRigImporter*>(this)->GetAssetExport())) {
+		const TSharedPtr<FJsonObject>* Bag = nullptr;
+		const TArray<TSharedPtr<FJsonValue>>* Values = nullptr;
+		if (!GetAssetData()->TryGetObjectField(TEXT("Variables"), Bag) || !(*Bag)->TryGetArrayField(TEXT("Properties"), Values)) return;
+
+		const TSharedPtr<FJsonObject> Defaults = MakeShared<FJsonObject>();
+		for (const TSharedPtr<FJsonValue>& Value : *Values) {
+			const TSharedPtr<FJsonObject> Tagged = Value.IsValid() ? Value->AsObject() : nullptr;
+			FString Name;
+			if (!Tagged.IsValid() || !Tagged->TryGetStringField(TEXT("Name"), Name) || !Tagged->HasField(TEXT("Tag"))) continue;
+			const TSharedPtr<FJsonValue> Tag = Tagged->TryGetField(TEXT("Tag"));
+			if (Tag.IsValid() && !Tag->IsNull()) Defaults->SetField(StringToJsonKey(Name), Tag);
+		}
+
+		if (Defaults->Values.Num() > 0) GetObjectSerializer()->DeserializeObjectProperties(Defaults, GeneratedClass->GetDefaultObject());
+		return;
+	}
 
 	FUObjectExport* DefaultObjectExport = GetClassDefaultObject(GetContainer(), GetAssetDataAsValue());
 
