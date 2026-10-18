@@ -218,6 +218,9 @@ public:
 		 * followed by fourteen rules that only the editor copy has, and every rule's number is a
 		 * position in a table it is not being served from. Counted through, each reference lands on
 		 * its neighbour. The name means the same thing in both. */
+		/* The whole path a nested reference names, which a match by number has to be too */
+		FString NestedWhole;
+
 		if (FString Named; Object->TryGetStringField(TEXT("ObjectName"), Named)) {
 			/* The whole way down to it first, since a name on its own is not always the one thing
 			 * it names: a script keeps a graph per version of itself and they are copies, so the
@@ -247,10 +250,19 @@ public:
 
 			FUObjectExport* Matched = nullptr;
 
+			/* Below a package a reference names its object by its whole path, and an export of that name elsewhere
+			 * is another object: a Niagara emitter's parent copy (Sparks_0.NiagaraEmitter_1) that didn't come across
+			 * is not the system's own NiagaraEmitter_1, which its graph went into otherwise */
+			const bool bNested = Parts.Num() > 2;
+
+			if (bNested) NestedWhole = Whole;
+
 			for (FUObjectExport* Export : Exports) {
 				if (Leaf.IsEmpty() || !Export->IsJsonValid() || Export->GetName().ToString() != Leaf) {
 					continue;
 				}
+
+				if (bNested && Export->GetWholePath() != Whole) continue;
 
 				/* Two of a name, and nothing here to tell them apart, so the number has the say */
 				if (Matched != nullptr) {
@@ -278,7 +290,7 @@ public:
 
 		for (FUObjectExport* Export : Exports) {
 			if (Export->Position == Index) {
-				return Export;
+				return NestedWhole.IsEmpty() || Export->GetWholePath() == NestedWhole ? Export : FUObjectExport::EmptyExport();
 			}
 		}
 

@@ -283,6 +283,32 @@ namespace {
 	}
 }
 
+FUObjectExport* UObjectSerializer::OuterExportOf(const TSharedPtr<FJsonObject>& ExportObject) const {
+	const TSharedPtr<FJsonObject>* Outer = nullptr;
+
+	if (!ExportObject.IsValid() || !ExportObject->TryGetObjectField(TEXT("Outer"), Outer) || !Outer->IsValid()) return FUObjectExport::EmptyExport();
+
+	FUObjectExport* Found = PropertySerializer->ExportsContainer->GetExportByObjectPath(*Outer);
+
+	/* The package itself is no export of the container's */
+	return Found != nullptr && Found->IsJsonValid() && Found->JsonObject != ExportObject ? Found : FUObjectExport::EmptyExport();
+}
+
+bool UObjectSerializer::NamesMissingNestedOuter(const TSharedPtr<FJsonObject>& ExportObject) const {
+	const TSharedPtr<FJsonObject>* Outer = nullptr;
+	FString Named;
+
+	if (!ExportObject.IsValid() || !ExportObject->TryGetObjectField(TEXT("Outer"), Outer) || !Outer->IsValid() || !(*Outer)->TryGetStringField(TEXT("ObjectName"), Named)) return false;
+
+	FString Whole = StripObjectOuter(Named);
+	Whole.ReplaceInline(TEXT("."), TEXT(":"));
+
+	TArray<FString> Parts;
+	Whole.ParseIntoArray(Parts, TEXT(":"), true);
+
+	return Parts.Num() > 2 && !OuterExportOf(ExportObject)->IsJsonValid();
+}
+
 UObject* UObjectSerializer::SpawnExport(FUObjectExport* Export, const bool bOnlySerialize) {
 	if (Export == nullptr) return nullptr;
 
@@ -321,6 +347,10 @@ UObject* UObjectSerializer::SpawnExport(FUObjectExport* Export, const bool bOnly
 	const FString Outer = GetOuterFromObjectOuter(Export->JsonObject->TryGetField(TEXT("Outer")));
 	UObject* ObjectOuter = nullptr;
 
+	/* Under an outer named by a nested path that isn't among the exports (a Niagara emitter's parent copy that didn't
+	 * come across), nothing: another object of the outer's name is not it */
+	if (!Export->Object && NamesMissingNestedOuter(Export->JsonObject)) return nullptr;
+
 	/* Find the outer using the tree segment
 	 *
 	 * The whole way down first, and the names below only when it misses. A name is not one thing:
@@ -337,8 +367,19 @@ UObject* UObjectSerializer::SpawnExport(FUObjectExport* Export, const bool bOnly
 				SpawnExport(OuterExport);
 			}
 
+			/* One an importer made itself, registered against this very export */
+			if (OuterExport->Object == nullptr) {
+				if (UObject** Registered = ConstructedByExport.Find(OuterExport->JsonObject)) ObjectOuter = *Registered;
+			}
+
+			/* The outer by its whole path is the one; another of its name is not. Where that one couldn't be made,
+			 * neither can this: a Niagara emitter's parent copy (Sparks_0.NiagaraEmitter_1) put its graph into the
+			 * system's emitter of the same name otherwise. */
 			if (OuterExport->Object) {
 				ObjectOuter = OuterExport->Object;
+			} else if (ObjectOuter == nullptr && !Export->Object) {
+				UE_LOG(LogReflection, Verbose, TEXT("\"%s\" is left out: its outer \"%s\" wasn't made"), *Export->GetName().ToString(), *OuterExport->GetName().ToString());
+				return nullptr;
 			}
 		}
 	}
@@ -473,6 +514,7 @@ void UObjectSerializer::SetPropertySerializer(UPropertySerializer* NewPropertySe
 void UObjectSerializer::SetExportForDeserialization(const TSharedPtr<FJsonObject>& JsonObject, UObject* Object) {
 	ExportsToNotDeserialize.Add(JsonObject->GetStringField(TEXT("Name")));
 	ConstructedObjects.Add(JsonObject->GetStringField(TEXT("Name")), Object);
+	ConstructedByExport.Add(JsonObject, Object);
 }
 
 void UObjectSerializer::DeserializeExports(FUObjectExportContainer* Container, const bool CreateObjects) {
@@ -565,7 +607,25 @@ void UObjectSerializer::DeserializeExport(FUObjectExport* Export, TMap<TSharedPt
 	const FString Outer = GetOuterFromObjectOuter(ExportObject->TryGetField(TEXT("Outer")));
 	UObject* ObjectOuter = nullptr;
 
-	if (FUObjectExport* FoundExport = PropertySerializer->ExportsContainer->Find(Outer); FoundExport->JsonObject.IsValid()) {
+	bool bOuterByPath = false;
+
+	/* The outer as the reference to it names it: by its whole path, else its export number (a name alone can be two
+	 * exports: a Niagara system's emitter NiagaraEmitter_1 and another emitter's parent copy of that name) */
+	if (!Export->Object && NamesMissingNestedOuter(ExportObject)) return;
+
+	if (FUObjectExport* Named = OuterExportOf(ExportObject); Named->IsJsonValid()) {
+		if (Named->Object == nullptr) {
+			DeserializeExport(Named, ExportsMap);
+		}
+
+		ObjectOuter = Named->Object;
+
+		if (ObjectOuter == nullptr) {
+			if (UObject** Registered = ConstructedByExport.Find(Named->JsonObject)) ObjectOuter = *Registered;
+		}
+
+		bOuterByPath = true;
+	} else if (FUObjectExport* FoundExport = PropertySerializer->ExportsContainer->Find(Outer); FoundExport->JsonObject.IsValid()) {
 		if (FoundExport->Object == nullptr) {
 			DeserializeExport(FoundExport, ExportsMap);
 		}
@@ -583,13 +643,27 @@ void UObjectSerializer::DeserializeExport(FUObjectExport* Export, TMap<TSharedPt
 			}
 		
 			UObject* FoundObject = FoundExport->Object;
+
+			/* One an importer made itself, registered against this very export */
+			if (FoundObject == nullptr) {
+				if (UObject** Registered = ConstructedByExport.Find(FoundExport->JsonObject)) FoundObject = *Registered;
+			}
+
 			ObjectOuter = FoundObject;
+			bOuterByPath = true;
 		}
 	}
 
-	if (UObject** ConstructedObject = ConstructedObjects.Find(Outer)) {
+	/* An object an importer made itself, by name: only where the outer's whole path found no export. A name alone
+	 * is not the one object: a Niagara system holds its emitter NiagaraEmitter_1 and, under another emitter, that
+	 * emitter's parent of the same name, whose graph went into the first one's and broke it
+	 * (NS_Emote_BankNotes_Burst_Flame_Feet's Start_Fire_Sprites_Dark). */
+	if (UObject** ConstructedObject = ConstructedObjects.Find(Outer); ConstructedObject != nullptr && !bOuterByPath) {
 		ObjectOuter = *ConstructedObject;
 	}
+
+	/* Under an outer that wasn't made (an export left alone), nothing is made either, rather than under another */
+	if (bOuterByPath && ObjectOuter == nullptr && !Export->Object) return;
 
 	if (Export->Object) return;
 	
