@@ -113,6 +113,8 @@ void FNiagaraGraphs::Rebuild(FUObjectExportContainer* Container, UPackage* Packa
 	/* Every pin the export lists, made on the node that owns it. Kept against the node and the id
 	 * it was written with, because that pair is what a link names. */
 	TMap<TPair<FString, FGuid>, UEdGraphPin*> Made;
+	/* The node each pin above was made on, which a pin it has since thrown away no longer names */
+	TMap<UEdGraphPin*, UEdGraphNode*> MadeOn;
 
 	for (FUObjectExport* Export : Container->Exports) {
 		UEdGraphNode* Node = Cast<UEdGraphNode>(Export->Object);
@@ -210,6 +212,7 @@ void FNiagaraGraphs::Rebuild(FUObjectExportContainer* Container, UPackage* Packa
 			Entry->TryGetStringField(TEXT("PinToolTip"), Pin->PinToolTip);
 
 			Made.Add(TPair<FString, FGuid>(Node->GetPathName(Package), Pin->PinId), Pin);
+			MadeOn.Add(Pin, Node);
 
 			OutStats.Pins++;
 		}
@@ -324,6 +327,14 @@ void FNiagaraGraphs::Rebuild(FUObjectExportContainer* Container, UPackage* Packa
 	}
 #endif
 
+	auto Current = [&MadeOn](UEdGraphPin* Pin) -> UEdGraphPin* {
+		if (!Pin->WasTrashed()) return Pin;
+		UEdGraphNode* Node = MadeOn.FindRef(Pin);
+		if (Node == nullptr) return nullptr;
+		if (UEdGraphPin* Same = Node->FindPinById(Pin->PinId)) return Same;
+		return Node->FindPin(Pin->PinName, Pin->Direction);
+	};
+
 	/* Joined up once every pin exists, since a link reaches across nodes and there is no order
 	 * that has both ends of all of them made first */
 	for (FUObjectExport* Export : Container->Exports) {
@@ -366,9 +377,23 @@ void FNiagaraGraphs::Rebuild(FUObjectExportContainer* Container, UPackage* Packa
 					continue;
 				}
 
+				/* A pin made above that its node has since thrown away: a function call remakes its pins from the
+				 * script it calls once something looks it over. The link goes to the pin standing in its place, the
+				 * one with its id or else its name and direction; linking the thrown-away one would assert. */
+				UEdGraphPin* FromPin = Current(*From);
+				UEdGraphPin* ToPin = Current(*To);
+
+				if (FromPin == nullptr || ToPin == nullptr) {
+					UE_LOG(LogReflection, Warning, TEXT("\"%s\" no longer has pin \"%s\", or \"%s\" pin \"%s\": the link between them is left out"),
+						*GetNameSafe(MadeOn.FindRef(*From)), *(*From)->PinName.ToString(), *GetNameSafe(MadeOn.FindRef(*To)), *(*To)->PinName.ToString());
+					OutStats.Dangling++;
+
+					continue;
+				}
+
 				/* Both ends list each other, so the second time round the pair is already joined */
-				if (!(*From)->LinkedTo.Contains(*To)) {
-					(*From)->MakeLinkTo(*To);
+				if (!FromPin->LinkedTo.Contains(ToPin)) {
+					FromPin->MakeLinkTo(ToPin);
 
 					OutStats.Links++;
 				}
