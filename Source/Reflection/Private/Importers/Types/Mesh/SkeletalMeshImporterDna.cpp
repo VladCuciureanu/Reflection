@@ -74,6 +74,17 @@ TArray<uint8> ISkeletalMeshImporter::RewriteDnaForAnimNode(USkeletalMesh* Skelet
 	 * the rig rests at, and in the deltas every control drives. */
 	static constexpr int32 AttributesPerJoint = 9;
 
+	/* 5.8 has no such reading any more. Loaded the way the cooked asset is (FDNAConfig::Legacy,
+	 * see below), the DNA's joints come out of RigLogic as they are written: measured on Anthea's
+	 * head, the joints the node wrote were the neutral above number for number, so with the
+	 * negations every face was mirrored in Y. There the pose the mesh is bound at goes in as it
+	 * is, and the deltas are left alone. */
+#if UE5_8_BEYOND
+	static constexpr float Flip = 1.0f;
+#else
+	static constexpr float Flip = -1.0f;
+#endif
+
 	TArray<uint8> Source = Dna;
 
 	auto InStream = rl4::makeScoped<trio::MemoryStream>();
@@ -126,14 +137,14 @@ TArray<uint8> ISkeletalMeshImporter::RewriteDnaForAnimNode(USkeletalMesh* Skelet
 			 * out of it as the pose the mesh is bound at */
 			Translations.Add(dna::Vector3{
 				static_cast<float>(Bound.GetTranslation().X),
-				static_cast<float>(-Bound.GetTranslation().Y),
+				static_cast<float>(Flip * Bound.GetTranslation().Y),
 				static_cast<float>(Bound.GetTranslation().Z)
 			});
 
 			Rotations.Add(dna::Vector3{
-				static_cast<float>(Rotation.Roll),
+				static_cast<float>(-Flip * Rotation.Roll),
 				static_cast<float>(-Rotation.Pitch),
-				static_cast<float>(-Rotation.Yaw)
+				static_cast<float>(Flip * Rotation.Yaw)
 			});
 
 			Copied++;
@@ -145,10 +156,10 @@ TArray<uint8> ISkeletalMeshImporter::RewriteDnaForAnimNode(USkeletalMesh* Skelet
 		dna::Vector3 Translation = Reader->getNeutralJointTranslation(Joint);
 		dna::Vector3 Rotation = Reader->getNeutralJointRotation(Joint);
 
-		Translation.y = -Translation.y;
+		Translation.y *= Flip;
 
-		Rotation.x = -Rotation.x;
-		Rotation.z = -Rotation.z;
+		Rotation.x *= Flip;
+		Rotation.z *= Flip;
 
 		Translations.Add(Translation);
 		Rotations.Add(Rotation);
@@ -176,7 +187,7 @@ TArray<uint8> ISkeletalMeshImporter::RewriteDnaForAnimNode(USkeletalMesh* Skelet
 		for (int32 Row = 0; Row < static_cast<int32>(Outputs.size()); ++Row) {
 			const int32 Attribute = Outputs[Row] % AttributesPerJoint;
 
-			if (Attribute != 1 && Attribute != 3 && Attribute != 5) continue;
+			if (Flip > 0.0f || (Attribute != 1 && Attribute != 3 && Attribute != 5)) continue;
 
 			for (int32 Column = 0; Column < Columns; ++Column) {
 				const int32 Index = Row * Columns + Column;
@@ -276,7 +287,21 @@ bool ISkeletalMeshImporter::ApplyDna(USkeletalMesh* SkeletalMesh, const FString&
 	/* Behavior is what RigLogic runs a face with, geometry is what the editor updates the mesh
 	 * from. A cook keeps the first and leaves an empty stream where the second was, so the mesh
 	 * animates and the design time half is simply not there to rebuild. */
+#if UE5_8_BEYOND
+	/* 5.8 runs RigLogic in whatever space its reader is in, and ReadDNAFromBuffer reads a DNA as
+	 * source (Maya) space. The game's own DNA is a cooked UDNAAsset, whose load reads its stream
+	 * with FDNAConfig::Legacy (DNAAsset.cpp), so it is read that way here too. */
+	auto DnaStream = rl4::makeScoped<trio::MemoryStream>();
+	DnaStream->write(reinterpret_cast<const char*>(Dna.GetData()), Dna.Num());
+	DnaStream->seek(0);
+
+	FDNAConfig LegacyConfig = FDNAConfig::Legacy(ECoordinateSystemTransformPolicy::Transform);
+	LegacyConfig.Layers = static_cast<int32>(EDNADataLayer::Behavior | EDNADataLayer::MachineLearnedBehavior);
+
+	const TSharedPtr<IDNAReader> Behavior = LoadDNAFromStream(DnaStream.get(), LegacyConfig);
+#else
 	const TSharedPtr<IDNAReader> Behavior = ReadDNAFromBuffer(&Dna, EDNADataLayer::Behavior | EDNADataLayer::MachineLearnedBehavior, 0u);
+#endif
 
 	/* The only silent way out of here, and the one that leaves a mesh with no DNA on it at all */
 	if (!Behavior.IsValid()) {
@@ -315,6 +340,15 @@ bool ISkeletalMeshImporter::ApplyDna(USkeletalMesh* SkeletalMesh, const FString&
 		DnaUserData = NewObject<UDNAAssetUserData>(SkeletalMesh, TEXT("DNAAssetUserData"), RF_Public);
 
 		SkeletalMesh->AddAssetUserData(DnaUserData);
+	}
+
+	/* A mesh reflected by an engine without the user data kept its DNA in a UDNAAsset called DNA,
+	 * hung straight off the mesh. Here that one is dead weight the node never reads, and its name is
+	 * the one the UDNA below is made under: making an object over another class of the same name
+	 * is a fatal error. It is moved out of the mesh and dropped from its user data. */
+	if (UObject* Legacy = StaticFindObjectFast(nullptr, SkeletalMesh, TEXT("DNA")); Legacy != nullptr && !Legacy->IsA<UDNA>()) {
+		SkeletalMesh->RemoveUserDataOfClass(UDNAAsset::StaticClass());
+		Legacy->Rename(nullptr, GetTransientPackage(), REN_DontCreateRedirectors | REN_NonTransactional);
 	}
 
 	if (DnaUserData->DNAAsset == nullptr) {
