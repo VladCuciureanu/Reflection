@@ -826,7 +826,8 @@ void UPropertySerializer::DeserializePropertyValue(FProperty* Property, const TS
 				ObjectOuter = Penultimate;
 			}
 
-			if (!ObjectOuter.IsEmpty()) {
+			/* Without a package being read (a property set outside an import) there is nothing to look in */
+			if (!ObjectOuter.IsEmpty() && ExportsContainer) {
 				if (ObjectOuter.Contains(":")) {
 					ObjectOuter.Split(":", nullptr, &ObjectOuter);
 				}
@@ -838,7 +839,7 @@ void UPropertySerializer::DeserializePropertyValue(FProperty* Property, const TS
 				}
 			}
 
-			if (FallbackToParentTrace) {
+			if (FallbackToParentTrace && ExportsContainer) {
 				if (UObject* Parent = ObjectSerializer->Parent) {
 					FString Name = Parent->GetName();
 
