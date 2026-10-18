@@ -129,6 +129,9 @@ bool IAnimSequenceImporter::Import() {
 	 * whose keys cannot be had, so a Cloud that isn't running leaves the last import standing. */
 	TSharedPtr<FJsonObject> Payload = GetAnimation(FetchPath);
 
+	/* Whether its keys were built over an animation somebody named, rather than the skeleton's own pose */
+	bool bBuiltOverNamedBase = false;
+
 	/* A difference with nothing to be put back over: it names a frame of itself, or names an
 	 * animation that isn't there, or names none at all, which is what an aim offset pose is left as
 	 * once it is cooked. The Cloud knows what a good few of them were built over and says so by
@@ -150,6 +153,7 @@ bool IAnimSequenceImporter::Import() {
 		if (bAsk && SAdditiveBaseDialog::Open(GetAssetName(), BasePath) && !BasePath.IsEmpty()) {
 			if (const TSharedPtr<FJsonObject> Rebuilt = GetAnimation(FetchPath, BasePath)) {
 				Payload = Rebuilt;
+				bBuiltOverNamedBase = true;
 
 				UE_LOG(LogReflection, Display, TEXT("\"%s\" was built over \"%s\""), *GetAssetName(), *BasePath);
 			} else {
@@ -203,6 +207,20 @@ bool IAnimSequenceImporter::Import() {
 		"Skeleton",
 		"SkeletonGuid",
 	}), AnimSequence);
+
+#if WITH_EDITORONLY_DATA
+	/* A difference against a frame of another animation that the cook didn't keep (RefPoseSeq is editor data). The
+	 * Cloud then built its keys over the skeleton's own pose, and the engine takes the difference again against the
+	 * base the sequence names: against a frame of nothing it is the whole pose a second time, which threw PolkaSkate's
+	 * spine thousands of units off through her Familiar additives. Named as the skeleton's pose, the difference comes
+	 * back as the one that was cooked. */
+	if (!bBuiltOverNamedBase && AnimSequence->AdditiveAnimType != AAT_None && AnimSequence->RefPoseSeq == nullptr
+		&& (AnimSequence->RefPoseType == ABPT_AnimFrame || AnimSequence->RefPoseType == ABPT_AnimScaled)) {
+		AnimSequence->RefPoseType = ABPT_RefPose;
+
+		UE_LOG(LogReflection, Display, TEXT("\"%s\" is a difference against an animation the cook didn't keep: it is taken against the skeleton's pose it was built over"), *GetAssetName());
+	}
+#endif
 
 	/* Held onto across the tracks below, which are what set the length the sequence plays for.
 	 * The engine answers a length it considers grown by treating the difference as time inserted
