@@ -98,6 +98,31 @@ namespace {
 	}
 }
 
+int32 FNiagaraEmitterRepair::DropScriptlessStages(UObject* Emitter) {
+	int32 Unstaged = 0;
+
+	for (const FNiagaraVersion& Version : FNiagaraVersions::All(Emitter)) {
+		const FArrayProperty* Stages = FindFProperty<FArrayProperty>(Version.Struct, TEXT("SimulationStages"));
+		const FObjectPropertyBase* Entry = Stages ? CastField<FObjectPropertyBase>(Stages->Inner) : nullptr;
+
+		if (Entry == nullptr) continue;
+
+		FScriptArrayHelper Held(Stages, Stages->ContainerPtrToValuePtr<void>(Version.Data));
+
+		for (int32 Index = Held.Num() - 1; Index >= 0; Index--) {
+			const UObject* Stage = Entry->GetObjectPropertyValue(Held.GetRawPtr(Index));
+			const FObjectPropertyBase* ScriptOf = Stage ? FindFProperty<FObjectPropertyBase>(Stage->GetClass(), TEXT("Script")) : nullptr;
+
+			if (Stage == nullptr || (ScriptOf != nullptr && ScriptOf->GetObjectPropertyValue_InContainer(Stage) == nullptr)) {
+				Held.RemoveValues(Index);
+				Unstaged++;
+			}
+		}
+	}
+
+	return Unstaged;
+}
+
 void FNiagaraEmitterRepair::Repair(FUObjectExportContainer* Container, UObject* Asset, const FString& Name,
 	const FNiagaraGraphStats& Stats, int32 Restored) {
 	/* Every version the emitter keeps, not only the one it says it is now.
@@ -293,6 +318,10 @@ void FNiagaraEmitterRepair::Repair(FUObjectExportContainer* Container, UObject* 
 	 * the parent's copy that came across is not one the merge can read: FN_ImpactMajor_Burst_Baseline's
 	 * emitters took the editor down in FNiagaraScriptMergeManager::MergeEmitter on a null script. Cleared,
 	 * the emitter stands on its own graph, which is what it plays. */
+	if (const int32 Unstaged = DropScriptlessStages(Asset); Unstaged > 0) {
+		UE_LOG(LogReflection, Display, TEXT("\"%s\" left out %d simulation stage(s) with no script"), *Name, Unstaged);
+	}
+
 	for (const FNiagaraVersion& Version : Versions) {
 		for (const TCHAR* Field : { TEXT("VersionedParent"), TEXT("VersionedParentAtLastMerge") }) {
 			if (const FStructProperty* Parent = FindFProperty<FStructProperty>(Version.Struct, Field)) {
