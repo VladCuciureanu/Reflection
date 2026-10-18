@@ -43,7 +43,8 @@ private:
 /* Later cooks keep a rig's class as the RigVM one it derives from; the class it generates still derives from ControlRig. */
 REGISTER_IMPORTER(IControlRigImporter, (TArray<FString>{
 	TEXT("ControlRigBlueprintGeneratedClass"),
-	TEXT("RigVMBlueprintGeneratedClass")
+	TEXT("RigVMBlueprintGeneratedClass"),
+	TEXT("ControlRigRuntimeAsset")
 }), "Animation Assets");
 
 #endif
