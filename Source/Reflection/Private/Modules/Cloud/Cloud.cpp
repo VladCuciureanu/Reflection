@@ -298,10 +298,11 @@ TArray<uint8> Cloud::Export::GetDnaBlocking(const FString& Path) {
 		return Response->GetContent();
 	};
 
-#if REFLECTION_DNA_USER_DATA
-	/* This engine's own RigLogic is what wrote the cook, so it reads it as it stands */
-	return Fetch(false);
-#else
+	/* The game is cooked by a newer RigLogic than any engine this builds against (UE6 for Fortnite
+	 * 42.x), which moves the rig out of the DNA into a baked dump beside it: the DNA as packaged is
+	 * the definition alone, with no joint groups, and a face reads it as a rig that does nothing. The
+	 * rebuilt one has the behavior put back; for a DNA that never had it moved out it is the packaged
+	 * one unchanged. This holds on 5.8 too, whose UDNA reads a DNA the same way. */
 	if (TArray<uint8> Rebuilt = Fetch(true); Rebuilt.Num() != 0) {
 		return Rebuilt;
 	}
@@ -310,7 +311,6 @@ TArray<uint8> Cloud::Export::GetDnaBlocking(const FString& Path) {
 		TEXT("The rig in \"%s\" could not be rebuilt for this engine, falling back to the DNA as packaged"), *Path);
 
 	return Fetch(false);
-#endif
 }
 
 TSharedPtr<FJsonObject> Cloud::Export::GetMorphTargetsBlocking(const FString& Path) {
