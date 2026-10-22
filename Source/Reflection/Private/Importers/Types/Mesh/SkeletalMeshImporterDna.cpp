@@ -85,16 +85,40 @@ TArray<uint8> ISkeletalMeshImporter::RewriteDnaForAnimNode(USkeletalMesh* Skelet
 	static constexpr float Flip = -1.0f;
 #endif
 
+#if UE5_8_BEYOND
+	/* A DNA declares the axes it is written in, and 5.8's load (FDNAConfig::Legacy, as the anim
+	 * node's DNA is read) converts it from those into the node's: Core's rebuilt one declares
+	 * MetaHuman's source axes (left, up, front), where the node's are (left, down, front), so the
+	 * load negates translation Y and rotations X and Z, the neutral and every delta alike. The
+	 * neutral above is the node's, so the DNA is converted first, by that same load, and written
+	 * back declaring the node's axes, which a later load then takes as already converted. A DNA
+	 * already in them (a packaged one) comes through unchanged. */
+	auto InStream = rl4::makeScoped<trio::MemoryStream>();
+	InStream->write(reinterpret_cast<const char*>(Dna.GetData()), Dna.Num());
+	InStream->seek(0);
+
+	FDNAConfig ToNodeAxes = FDNAConfig::Legacy(ECoordinateSystemTransformPolicy::Transform);
+	ToNodeAxes.Layers = static_cast<int32>(EDNADataLayer::All);
+
+	const TSharedPtr<IDNAReader> Converted = LoadDNAFromStream(InStream.get(), ToNodeAxes);
+	const dna::Reader* Reader = Converted.IsValid() ? Converted->Unwrap() : nullptr;
+
+	if (Reader == nullptr) {
+		UE_LOG(LogReflection, Warning, TEXT("Reading the DNA to rewrite it failed: %s"), ANSI_TO_TCHAR(rl4::Status::get().message));
+
+		return Dna;
+	}
+#else
 	TArray<uint8> Source = Dna;
 
 	auto InStream = rl4::makeScoped<trio::MemoryStream>();
 	InStream->write(reinterpret_cast<const char*>(Source.GetData()), Source.Num());
 	InStream->seek(0);
 
-	auto Reader = rl4::makeScoped<dna::BinaryStreamReader>(
+	auto SourceReader = rl4::makeScoped<dna::BinaryStreamReader>(
 		InStream.get(), dna::DataLayer::All, dna::UnknownLayerPolicy::Preserve, 0u, FMemoryResource::Instance());
 
-	Reader->read();
+	SourceReader->read();
 
 	if (!rl4::Status::isOk()) {
 		UE_LOG(LogReflection, Warning, TEXT("Reading the DNA to rewrite it failed: %s"), ANSI_TO_TCHAR(rl4::Status::get().message));
@@ -102,10 +126,19 @@ TArray<uint8> ISkeletalMeshImporter::RewriteDnaForAnimNode(USkeletalMesh* Skelet
 		return Dna;
 	}
 
+	const dna::Reader* Reader = SourceReader.get();
+#endif
+
 	auto OutStream = rl4::makeScoped<trio::MemoryStream>();
 	auto Writer = rl4::makeScoped<dna::BinaryStreamWriter>(OutStream.get(), FMemoryResource::Instance());
 
-	Writer->setFrom(Reader.get(), dna::DataLayer::All, dna::UnknownLayerPolicy::Preserve, FMemoryResource::Instance());
+	static_cast<dna::Writer*>(Writer.get())->setFrom(Reader, dna::DataLayer::All, dna::UnknownLayerPolicy::Preserve, FMemoryResource::Instance());
+
+#if UE5_8_BEYOND
+	Writer->setCoordinateSystem(dna::CoordinateSystem{dna::Direction::left, dna::Direction::down, dna::Direction::front});
+	Writer->setRotationSign(dna::RotationSign{tdm::rot_dir::positive, tdm::rot_dir::positive, tdm::rot_dir::positive});
+	Writer->setRotationSequence(dna::RotationSequence::xyz);
+#endif
 
 	/* The pose the rig rests at. Not the DNA's own: the mesh's, taken from the package and written
 	 * back in the node's axes, so the rig rests exactly where the mesh is bound for every joint it
