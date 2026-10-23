@@ -142,9 +142,10 @@ bool IAnimSequenceImporter::Import() {
 		/* Asked only of somebody who asked for this one animation.
 		 *
 		 * A run of folders is hundreds of these, and stopping on a dialog for each is not a
-		 * question, it is a queue. Left unasked, the difference is built over the skeleton's own
+		 * question, it is a queue. Nor is a script running unattended (remote execution's), which
+		 * has nobody to answer. Left unasked, the difference is built over the skeleton's own
 		 * pose, which is what going without has always meant. */
-		const bool bAsk = !FImportJob::IsRunning() && !IsRunningCommandlet();
+		const bool bAsk = !FImportJob::IsRunning() && !IsRunningCommandlet() && !GIsRunningUnattendedScript;
 
 		if (!bAsk) {
 			UE_LOG(LogReflection, Display, TEXT("\"%s\" is a difference with nothing to put it over, and a run of assets is no place to ask what"), *GetAssetName());
