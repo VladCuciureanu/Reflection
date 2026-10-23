@@ -68,6 +68,9 @@ TMap<FString, TArray<FString>> ImportTypes::Templated = {
 		TEXT("Skeletal Assets"),
 		{
 			TEXT("SkeletalMeshLODSettings"),
+			/* HierarchyTableAnimation's standalone blend profile: its per-bone weights are cached in its properties,
+			 * which is all a cooked game keeps of it */
+			TEXT("BlendProfileStandalone"),
 		}
 	},
 	{
