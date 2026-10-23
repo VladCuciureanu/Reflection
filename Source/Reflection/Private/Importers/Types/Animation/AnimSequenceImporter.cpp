@@ -215,7 +215,40 @@ bool IAnimSequenceImporter::Import() {
 	 * base the sequence names: against a frame of nothing it is the whole pose a second time, which threw PolkaSkate's
 	 * spine thousands of units off through her Familiar additives. Named as the skeleton's pose, the difference comes
 	 * back as the one that was cooked. */
-	if (!bBuiltOverNamedBase && AnimSequence->AdditiveAnimType != AAT_None && AnimSequence->RefPoseSeq == nullptr
+	/* What the Cloud built the keys over when it had one: the base somebody named (baseUsed), one it knows the sequence
+	 * was authored over (baseUsed: an aim offset's M_NoWep_Relaxed), or the one the sequence names itself
+	 * (refPoseSequence). Its keys are then the whole pose, so the sequence has to name that base again, read the way
+	 * the Cloud read it -- frame for frame for a base it was handed or found, at the named frame otherwise. Taken
+	 * against the skeleton's pose instead, the difference comes back as the base's distance from the bind pose on top
+	 * (a melee aim offset's centre sample bent the legs into a lunge). */
+	FString BuiltOver = Payload->HasTypedField<EJson::String>(TEXT("baseUsed")) ? Payload->GetStringField(TEXT("baseUsed")) : FString();
+	const bool bChosenBase = !BuiltOver.IsEmpty();
+	if (BuiltOver.IsEmpty() && Payload->HasTypedField<EJson::String>(TEXT("refPoseSequence"))) {
+		BuiltOver = Payload->GetStringField(TEXT("refPoseSequence"));
+	}
+
+	if (AnimSequence->AdditiveAnimType != AAT_None && AnimSequence->RefPoseSeq == nullptr && !BuiltOver.IsEmpty()
+		&& (AnimSequence->RefPoseType == ABPT_AnimFrame || AnimSequence->RefPoseType == ABPT_AnimScaled)) {
+		FString Package, Name;
+		if (!BuiltOver.Split(TEXT("."), &Package, &Name)) {
+			Package = BuiltOver;
+			Name = FPackageName::GetShortName(BuiltOver);
+		}
+
+		const TSharedPtr<FJsonObject> Reference = MakeShared<FJsonObject>();
+		Reference->SetStringField(TEXT("ObjectName"), FString::Printf(TEXT("AnimSequence'%s'"), *Name));
+		Reference->SetStringField(TEXT("ObjectPath"), Package + TEXT(".0"));
+
+		LoadExport<UAnimSequence>(&Reference, AnimSequence->RefPoseSeq);
+
+		if (AnimSequence->RefPoseSeq != nullptr) {
+			if (bChosenBase) AnimSequence->RefPoseType = ABPT_AnimScaled;
+
+			UE_LOG(LogReflection, Display, TEXT("\"%s\" is a difference against \"%s\", which its keys were built over"), *GetAssetName(), *BuiltOver);
+		}
+	}
+
+	if (AnimSequence->AdditiveAnimType != AAT_None && AnimSequence->RefPoseSeq == nullptr
 		&& (AnimSequence->RefPoseType == ABPT_AnimFrame || AnimSequence->RefPoseType == ABPT_AnimScaled)) {
 		AnimSequence->RefPoseType = ABPT_RefPose;
 
