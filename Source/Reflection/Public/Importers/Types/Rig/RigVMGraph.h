@@ -169,6 +169,14 @@ private:
 		bool bLazy = false;
 	};
 
+	/* A node's pin reading or writing a work register, at the instruction the node was compiled to */
+	struct FRegisterToucher {
+		int32 Instruction = INDEX_NONE;
+		int32 Node = INDEX_NONE;
+
+		FString Pin;
+	};
+
 	void ReadMemory(const FUObjectJsonValueExport& VirtualMachine);
 	void ReadCallables(const FUObjectJsonValueExport& ByteCode);
 
@@ -212,6 +220,12 @@ private:
 	 * copied from or to, and makes a set node for every copy into one of the rig's variables */
 	void CreateVariableSetters(const TArray<FUObjectJsonValueExport>& Instructions);
 	void CreateLinks(const TArray<FUObjectJsonValueExport>& Instructions);
+
+	/* The pins reading a register no pin owns from a copy into it until anything writes it again */
+	TArray<TPair<int32, FString>> FindCopyReaders(
+		const TArray<FUObjectJsonValueExport>& Instructions, int32 CopyIndex, int32 RegisterIndex,
+		const TMap<int32, TArray<FRegisterToucher>>& Touchers
+	) const;
 	void CreateExecution(const TArray<FUObjectJsonValueExport>& Instructions, const FUObjectJsonValueExport& ByteCode);
 
 	/* The register a memory type and index name, or null when the export doesn't have one */

@@ -2177,14 +2177,7 @@ void FRigVMGraphReconstruction::CreateLinks(const TArray<FUObjectJsonValueExport
 	 * writer handing to whatever touches the register next. Wiring everything to a single owner
 	 * instead loses that order: an array a SetNum sizes, a SetAtIndex fills and a reader consumes
 	 * would show all three hanging off the first node. */
-	struct FToucher {
-		int32 Instruction = INDEX_NONE;
-		int32 Node = INDEX_NONE;
-
-		FString Pin;
-	};
-
-	TMap<int32, TArray<FToucher>> Touchers;
+	TMap<int32, TArray<FRegisterToucher>> Touchers;
 
 	for (int32 NodeIndex = 0; NodeIndex < Nodes.Num(); ++NodeIndex) {
 		FNode& Node = Nodes[NodeIndex];
@@ -2200,8 +2193,8 @@ void FRigVMGraphReconstruction::CreateLinks(const TArray<FUObjectJsonValueExport
 		}
 	}
 
-	for (TPair<int32, TArray<FToucher>>& Pair : Touchers) {
-		Pair.Value.Sort([](const FToucher& A, const FToucher& B) {
+	for (TPair<int32, TArray<FRegisterToucher>>& Pair : Touchers) {
+		Pair.Value.Sort([](const FRegisterToucher& A, const FRegisterToucher& B) {
 			return A.Instruction < B.Instruction;
 		});
 
@@ -2210,7 +2203,7 @@ void FRigVMGraphReconstruction::CreateLinks(const TArray<FUObjectJsonValueExport
 		int32 LastWriterNode = INDEX_NONE;
 		FString LastWriterPin;
 
-		for (const FToucher& Toucher : Pair.Value) {
+		for (const FRegisterToucher& Toucher : Pair.Value) {
 			URigVMNode* TouchingNode = Nodes[Toucher.Node].Node;
 			if (TouchingNode == nullptr) continue;
 
@@ -2280,24 +2273,39 @@ void FRigVMGraphReconstruction::CreateLinks(const TArray<FUObjectJsonValueExport
 			continue;
 		}
 
+		/* The pins the copy fills. A register a pin owns is that pin. One no pin could claim is a
+		 * register several inputs read and only copies write, the compiler having given every pin
+		 * that reads one value the same register, named after the first of them: a sub pin of a
+		 * transform reaching both an axis and a multiply is what that looks like, and either way the
+		 * value goes to each node reading the register from this copy until anything writes it again. */
+		TArray<TPair<int32, FString>> Readers;
+
+		if (TargetRegister != nullptr && TargetRegister->Owner != INDEX_NONE) {
+			Readers.Emplace(TargetRegister->Owner, TargetRegister->OwnerPin);
+		} else if (TargetRegister != nullptr && TargetMemory == MemoryTypeWork) {
+			Readers = FindCopyReaders(Instructions, Index, TargetIndex, Touchers);
+		}
+
+		if (Readers.IsEmpty()) continue;
+
 		/* Read out of one of the rig's variables into a pin */
 		if (SourceMemory == MemoryTypeExternal) {
-			if (TargetRegister == nullptr || TargetRegister->Owner == INDEX_NONE) continue;
+			for (const TPair<int32, FString>& Reader : Readers) {
+				URigVMNode* Getter = FindOrAddVariableGetter(GetExternalVariable(SourceIndex), Reader.Key);
 
-			URigVMNode* Getter = FindOrAddVariableGetter(GetExternalVariable(SourceIndex), TargetRegister->Owner);
+				if (Getter == nullptr) continue;
 
-			if (Getter == nullptr) continue;
+				URigVMPin* ValuePin = Getter->FindPin(TEXT("Value"));
+				URigVMPin* TargetPin = Nodes[Reader.Key].Node != nullptr
+					? Nodes[Reader.Key].Node->FindPin(WithSegment(Reader.Value, TargetSegment))
+					: nullptr;
 
-			URigVMPin* ValuePin = Getter->FindPin(TEXT("Value"));
-			URigVMPin* TargetPin = Nodes[TargetRegister->Owner].Node != nullptr
-				? Nodes[TargetRegister->Owner].Node->FindPin(WithSegment(TargetRegister->OwnerPin, TargetSegment))
-				: nullptr;
-
-			if (ValuePin != nullptr && TargetPin != nullptr) {
-				if (GetController(Getter)->AddLink(ValuePin->GetPinPath(), TargetPin->GetPinPath(), false, false)) {
-					Stats.Links++;
-				} else {
-					Stats.FailedLinks++;
+				if (ValuePin != nullptr && TargetPin != nullptr) {
+					if (GetController(Getter)->AddLink(ValuePin->GetPinPath(), TargetPin->GetPinPath(), false, false)) {
+						Stats.Links++;
+					} else {
+						Stats.FailedLinks++;
+					}
 				}
 			}
 
@@ -2309,12 +2317,7 @@ void FRigVMGraphReconstruction::CreateLinks(const TArray<FUObjectJsonValueExport
 		 * own struct copied member by member into a node's pins is what these look like, and the
 		 * segment is what maps the struct's field names onto the pin's. */
 		if (SourceMemory == MemoryTypeLiteral) {
-			if (TargetRegister == nullptr || TargetRegister->Owner == INDEX_NONE) continue;
 			if (SourceRegister == nullptr || !SourceRegister->Value.IsValid()) continue;
-
-			URigVMNode* TargetNode = Nodes[TargetRegister->Owner].Node;
-
-			if (TargetNode == nullptr) continue;
 
 			TSharedPtr<FJsonValue> SourceValue = SourceRegister->Value;
 
@@ -2324,21 +2327,79 @@ void FRigVMGraphReconstruction::CreateLinks(const TArray<FUObjectJsonValueExport
 
 			if (!SourceValue.IsValid()) continue;
 
-			if (SetPinDefault(TargetNode->FindPin(WithSegment(TargetRegister->OwnerPin, TargetSegment)), SourceValue)) {
-				Stats.Defaults++;
+			for (const TPair<int32, FString>& Reader : Readers) {
+				URigVMNode* TargetNode = Nodes[Reader.Key].Node;
+
+				if (TargetNode == nullptr) continue;
+
+				if (SetPinDefault(TargetNode->FindPin(WithSegment(Reader.Value, TargetSegment)), SourceValue)) {
+					Stats.Defaults++;
+				}
 			}
 
 			continue;
 		}
 
-		if (SourceRegister == nullptr || TargetRegister == nullptr) continue;
-		if (SourceRegister->Owner == INDEX_NONE || TargetRegister->Owner == INDEX_NONE) continue;
+		if (SourceRegister == nullptr || SourceRegister->Owner == INDEX_NONE) continue;
 
-		Link(
-			SourceRegister->Owner, WithSegment(SourceRegister->OwnerPin, SourceSegment),
-			TargetRegister->Owner, WithSegment(TargetRegister->OwnerPin, TargetSegment)
-		);
+		for (const TPair<int32, FString>& Reader : Readers) {
+			Link(
+				SourceRegister->Owner, WithSegment(SourceRegister->OwnerPin, SourceSegment),
+				Reader.Key, WithSegment(Reader.Value, TargetSegment)
+			);
+		}
 	}
+}
+
+TArray<TPair<int32, FString>> FRigVMGraphReconstruction::FindCopyReaders(
+	const TArray<FUObjectJsonValueExport>& Instructions, const int32 CopyIndex, const int32 RegisterIndex,
+	const TMap<int32, TArray<FRegisterToucher>>& Touchers
+) const {
+	TArray<TPair<int32, FString>> Readers;
+
+	/* The next copy that writes the whole register again ends this one's value */
+	int32 NextCopy = Instructions.Num();
+
+	for (int32 Index = CopyIndex + 1; Index < Instructions.Num(); ++Index) {
+		const FUObjectJsonValueExport& Instruction = Instructions[Index];
+
+		if (Instruction.GetInteger(TEXT("OpCode"), -1) != OpCodeCopy) continue;
+
+		const FUObjectJsonValueExport Target = Instruction.GetObject(TEXT("Target"));
+
+		if (!Target.JsonObject.IsValid()) continue;
+		if (Target.GetInteger(TEXT("MemoryType"), INDEX_NONE) != MemoryTypeWork) continue;
+		if (Target.GetInteger(TEXT("RegisterIndex"), INDEX_NONE) != RegisterIndex) continue;
+		if (Target.GetInteger(TEXT("RegisterOffset"), NoRegisterOffset) != NoRegisterOffset) continue;
+
+		NextCopy = Index;
+		break;
+	}
+
+	const TArray<FRegisterToucher>* RegisterTouchers = Touchers.Find(RegisterIndex);
+
+	if (RegisterTouchers == nullptr) return Readers;
+
+	for (const FRegisterToucher& Toucher : *RegisterTouchers) {
+		if (Toucher.Instruction <= CopyIndex) continue;
+		if (Toucher.Instruction > NextCopy) break;
+
+		const URigVMNode* TouchingNode = Nodes[Toucher.Node].Node;
+		const URigVMPin* Pin = TouchingNode != nullptr ? TouchingNode->FindPin(Toucher.Pin) : nullptr;
+
+		if (Pin == nullptr) continue;
+
+		const ERigVMPinDirection Direction = Pin->GetDirection();
+
+		if (Direction == ERigVMPinDirection::Input || Direction == ERigVMPinDirection::IO) {
+			Readers.AddUnique(TPair<int32, FString>(Toucher.Node, Toucher.Pin));
+		}
+
+		/* Written over by a node: what reads it from here on reads that node */
+		if (Direction == ERigVMPinDirection::Output || Direction == ERigVMPinDirection::IO) break;
+	}
+
+	return Readers;
 }
 
 void FRigVMGraphReconstruction::CreateExecution(const TArray<FUObjectJsonValueExport>& Instructions, const FUObjectJsonValueExport& ByteCode) {
