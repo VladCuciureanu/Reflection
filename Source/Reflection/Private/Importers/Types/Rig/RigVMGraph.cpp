@@ -116,6 +116,17 @@ namespace {
 		return false;
 	}
 
+	/* The type a variable node is asked for. The controller takes the node's type from the variable it
+	 * names (RigVMController.cpp:2012) and reads the type passed in only to word an error, but given no
+	 * type object it first goes looking for one by the type's own name (RigVMController.cpp:2001-2008),
+	 * and for a fundamental type that is a search of every loaded object for one called "bool" or
+	 * "float". A rig's pins answer to those names: FortDeformRig's Bool is one, and with two such rigs
+	 * loaded the search ensures as ambiguous (RigVMTypeUtils.cpp:583). A type with no object has
+	 * nothing to look up, so it isn't handed over. */
+	FString VariableNodeCPPType(const FString& CPPType, const UObject* CPPTypeObject) {
+		return CPPTypeObject != nullptr ? CPPType : FString();
+	}
+
 	/* Opcodes are one enum with every deprecated per-operand execute in front of them, so the ones
 	 * that are still written carry numbers well past where they read */
 	constexpr int32 OpCodeCopy = 68;
@@ -1762,7 +1773,7 @@ void FRigVMGraphReconstruction::PromoteLocalVariables() {
 
 		URigVMNode* Getter = PinController->AddVariableNode(
 			FName(*Loose.VariableName),
-			Loose.Pin->GetCPPType(),
+			VariableNodeCPPType(Loose.Pin->GetCPPType(), Loose.Pin->GetCPPTypeObject()),
 			Loose.Pin->GetCPPTypeObject(),
 			true,
 			FString(),
@@ -2001,7 +2012,7 @@ URigVMNode* FRigVMGraphReconstruction::FindOrAddVariableGetter(const FString& Va
 
 	URigVMNode* Getter = GetController(Nodes[ConsumerNode].Callable)->AddVariableNode(
 		Variable->Name,
-		Variable->CPPType,
+		VariableNodeCPPType(Variable->CPPType, Variable->CPPTypeObject),
 		Variable->CPPTypeObject,
 		true,
 		FString(),
@@ -2102,7 +2113,7 @@ void FRigVMGraphReconstruction::CreateVariableSetters(const TArray<FUObjectJsonV
 
 		URigVMNode* Setter = GetController(FindCallable(Index))->AddVariableNode(
 			Variable->Name,
-			Variable->CPPType,
+			VariableNodeCPPType(Variable->CPPType, Variable->CPPTypeObject),
 			Variable->CPPTypeObject,
 			false,
 			FString(),
