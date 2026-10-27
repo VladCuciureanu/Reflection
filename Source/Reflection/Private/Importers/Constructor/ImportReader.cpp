@@ -17,6 +17,7 @@
 #include "Engine/EngineUtilities.h"
 #include "Utilities/JsonHelpers.h"
 #include "Modules/Cloud/Remote.h"
+#include "Modules/Cloud/Cloud.h"
 #include "UObject/UObjectHash.h"
 #include "Settings/SettingsAccess.h"
 
@@ -227,8 +228,34 @@ bool IImportReader::ReadExportsAndImport(const TArray<TSharedPtr<FJsonValue>>& E
 	return true;
 }
 
+/* Whether a class the engine lacks descends from SoundCue, by its parents in the game's mappings.
+ *
+ * Fortnite's cue templates come in a family (FortSoundCueTemplateBase, FortSoundCueTemplateSimple and
+ * the cues the game makes from them, GliderOpen and GliderClose among them), and each cue is cooked
+ * as an instance of its own leaf class. Their graphs are ordinary cue graphs all the same. */
+static bool DescendsFromSoundCue(const FString& Type) {
+	static TMap<FString, bool> Known;
+	if (const bool* Found = Known.Find(Type)) return *Found;
+
+	bool Result = false;
+	FString Current = Type;
+	for (int32 Depth = 0; Depth < 16 && !Current.IsEmpty(); ++Depth) {
+		if (Current == TEXT("SoundCue")) {
+			Result = true;
+			break;
+		}
+		const TSharedPtr<FJsonObject> Schema = Cloud::GetBlocking(TEXT("/api/schema"), { { TEXT("type"), Current } });
+		FString Super;
+		if (!Schema.IsValid() || !Schema->TryGetStringField(TEXT("super"), Super)) break;
+		Current = Super;
+	}
+
+	Known.Add(Type, Result);
+	return Result;
+}
+
 IImporter* IImportReader::ReadExportAndImport(FUObjectExportContainer* Container, FUObjectExport* Export, FString File, const bool HideNotifications, bool bUseRelativePath) {
-	const FString Type = Export->GetType().ToString();
+	FString Type = Export->GetType().ToString();
 	FString Name = Export->GetName().ToString();
 
 	const bool IsBlueprint = Type.Contains("BlueprintGeneratedClass");
@@ -294,6 +321,12 @@ IImporter* IImportReader::ReadExportAndImport(FUObjectExportContainer* Container
 	if (Class == nullptr && (Type == TEXT("FortSoundCueTemplate") || Type == TEXT("EmoteFoley")
 		|| Type == TEXT("EmoteMusic") || Type == TEXT("EmoteMusic3P"))) {
 		Class = USoundCue::StaticClass();
+	}
+
+	/* The rest of the family goes the same way, under the name the cue importer answers to. */
+	if (Class == nullptr && DescendsFromSoundCue(Type)) {
+		Class = USoundCue::StaticClass();
+		Type = TEXT("FortSoundCueTemplate");
 	}
 
 	if (Class == nullptr) return nullptr;
