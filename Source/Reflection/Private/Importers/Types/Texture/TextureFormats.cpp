@@ -84,13 +84,20 @@ bool FTextureFormats::GetLayout(const EPixelFormat Format, FTextureSourceLayout&
 			OutLayout.RequiresDecode = true;
 			return true;
 
-		/* Block compressed, 16 bytes per 4x4 block.
-		 * BC6H is HDR and decodes down to BGRA8 here, which clips it, but detex has no float
-		 * output wired up yet and a clipped texture beats no texture. */
+		/* Block compressed, 16 bytes per 4x4 block, HDR: decoded to half floats, so nothing above
+		 * 1 is clipped (a bloom kernel's centre, an HDR cubemap's sun) */
+		case PF_BC6H:
+			OutLayout.SourceFormat = TSF_RGBA16F;
+			OutLayout.BytesPerVoxel = 8;
+			OutLayout.BlockDim = 4;
+			OutLayout.BytesPerBlock = 16;
+			OutLayout.RequiresDecode = true;
+			return true;
+
+		/* Block compressed, 16 bytes per 4x4 block */
 		case PF_DXT3:
 		case PF_DXT5:
 		case PF_BC5:
-		case PF_BC6H:
 		case PF_BC7:
 			OutLayout.BlockDim = 4;
 			OutLayout.BytesPerBlock = 16;
@@ -127,7 +134,13 @@ void FTextureFormats::Decode(const uint8* Data, uint8* OutData, const int32 Size
 			Texture.width_in_blocks = SizeX / 4;
 			Texture.height_in_blocks = SizeY / 4;
 
-			detexDecompressTextureLinear(&Texture, OutData, DETEX_PIXEL_FORMAT_BGRA8);
+			/* BC6H's own output, half float R, G, B and an unused fourth, which is RGBA16F's alpha */
+			detexDecompressTextureLinear(&Texture, OutData, DETEX_PIXEL_FORMAT_FLOAT_RGBX16);
+
+			uint16* Pixel = reinterpret_cast<uint16*>(OutData);
+			for (int64 Index = 0; Index < static_cast<int64>(SizeX) * SizeY; Index++, Pixel += 4) {
+				Pixel[3] = 0x3C00; /* 1.0 */
+			}
 		}
 		break;
 
