@@ -58,7 +58,12 @@ namespace BlueprintCopyEvent {
 		Open.Add(Start);
 
 		while (Open.Num() > 0) {
+#if UE5_6_BEYOND
+			/* Pop's bool parameter became EAllowShrinking in 5.4, and the bool overload was removed in 5.8 */
+			UEdGraphNode* Node = Open.Pop(EAllowShrinking::No);
+#else
 			UEdGraphNode* Node = Open.Pop(false);
+#endif
 
 			if (!Node || Into.Contains(Node)) continue;
 
