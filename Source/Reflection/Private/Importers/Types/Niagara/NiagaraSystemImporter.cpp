@@ -183,11 +183,9 @@ void INiagaraSystemImporter::Validate(UObject* Asset) const {
 	}
 
 	/* Every emitter in the package, the handles' and the ones nested inside them (NS_Emote_StarStray's
-	 * FN_DebugGnomon carries another FN_DebugGnomon), gets the four scripts its PostLoad walks without asking
-	 * whether they are there (FVersionedNiagaraEmitterData::GetScripts): the particle spawn and update scripts and
-	 * the editor-only emitter spawn and update ones a cook doesn't carry. One missing gets an empty script of its
-	 * usage on the version's source, which the editor compiles from the graph; saved without it, the emitter took
-	 * the editor down on its next load. */
+	 * FN_DebugGnomon carries another FN_DebugGnomon), gets the scripts its PostLoad walks
+	 * (FNiagaraEmitterRepair::GiveRequiredScripts). The repair above only reaches the emitters directly under the
+	 * system, whose scripts are in place by now. */
 	int32 ScriptsMade = 0;
 
 	/* A renderer the cook left out (FN_DebugGnomon's, debug only) is an empty entry, which a cooked package may have
@@ -195,13 +193,6 @@ void INiagaraSystemImporter::Validate(UObject* Asset) const {
 	int32 RenderersDropped = 0;
 
 	if (FUObjectExportContainer* EmitterContainer = GetContainer()) {
-		const TPair<ENiagaraScriptUsage, const TCHAR*> Required[] = {
-			{ ENiagaraScriptUsage::ParticleSpawnScript, TEXT("SpawnScriptProps") },
-			{ ENiagaraScriptUsage::ParticleUpdateScript, TEXT("UpdateScriptProps") },
-			{ ENiagaraScriptUsage::EmitterSpawnScript, TEXT("EmitterSpawnScriptProps") },
-			{ ENiagaraScriptUsage::EmitterUpdateScript, TEXT("EmitterUpdateScriptProps") },
-		};
-
 		for (FUObjectExport* Export : EmitterContainer->Exports) {
 			UNiagaraEmitter* Emitter = Cast<UNiagaraEmitter>(Export->Object);
 			if (Emitter == nullptr) continue;
@@ -209,17 +200,7 @@ void INiagaraSystemImporter::Validate(UObject* Asset) const {
 			for (const FNiagaraVersion& Version : FNiagaraVersions::All(Emitter)) {
 				RenderersDropped += FNiagaraVersions::RemoveNulls(Version, TEXT("RendererProperties"));
 
-				for (const TPair<ENiagaraScriptUsage, const TCHAR*>& Slot : Required) {
-					if (FNiagaraVersions::GetObjectIn(Version, Slot.Value, TEXT("Script")) != nullptr) continue;
-
-					UNiagaraScript* Script = NewObject<UNiagaraScript>(Emitter, NAME_None, RF_Transactional);
-					Script->SetUsage(Slot.Key);
-					if (UNiagaraScriptSourceBase* Source = Cast<UNiagaraScriptSourceBase>(FNiagaraVersions::GetObject(Version, TEXT("GraphSource")))) {
-						Script->SetLatestSource(Source);
-					}
-
-					if (FNiagaraVersions::SetObjectIn(Version, Slot.Value, TEXT("Script"), Script)) ScriptsMade++;
-				}
+				ScriptsMade += FNiagaraEmitterRepair::GiveRequiredScripts(Emitter, Version, FNiagaraVersions::GetObject(Version, TEXT("GraphSource")));
 
 				/* And the GPU compute script the editor gives every emitter version (FN_ImpactMajor_Burst_Baseline's
 				 * Fireworks_Mesh_1 names one the cook left out): a GPU emitter's compile walks it, and took the editor

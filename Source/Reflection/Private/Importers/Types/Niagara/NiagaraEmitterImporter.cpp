@@ -98,6 +98,29 @@ namespace {
 	}
 }
 
+int32 FNiagaraEmitterRepair::GiveRequiredScripts(UObject* Emitter, const FNiagaraVersion& Version, UObject* Source) {
+	const TPair<ENiagaraScriptUsage, const TCHAR*> Required[] = {
+		{ ENiagaraScriptUsage::ParticleSpawnScript, TEXT("SpawnScriptProps") },
+		{ ENiagaraScriptUsage::ParticleUpdateScript, TEXT("UpdateScriptProps") },
+		{ ENiagaraScriptUsage::EmitterSpawnScript, TEXT("EmitterSpawnScriptProps") },
+		{ ENiagaraScriptUsage::EmitterUpdateScript, TEXT("EmitterUpdateScriptProps") },
+	};
+
+	int32 Made = 0;
+
+	for (const TPair<ENiagaraScriptUsage, const TCHAR*>& Slot : Required) {
+		if (FNiagaraVersions::GetObjectIn(Version, Slot.Value, TEXT("Script")) != nullptr) continue;
+
+		UNiagaraScript* Script = NewObject<UNiagaraScript>(Emitter, NAME_None, RF_Transactional);
+		Script->SetUsage(Slot.Key);
+		if (UNiagaraScriptSourceBase* Graph = Cast<UNiagaraScriptSourceBase>(Source)) Script->SetLatestSource(Graph);
+
+		if (FNiagaraVersions::SetObjectIn(Version, Slot.Value, TEXT("Script"), Script)) Made++;
+	}
+
+	return Made;
+}
+
 int32 FNiagaraEmitterRepair::DropScriptlessStages(UObject* Emitter) {
 	int32 Unstaged = 0;
 
@@ -226,27 +249,7 @@ void FNiagaraEmitterRepair::Repair(FUObjectExportContainer* Container, UObject* 
 			if (bSet) Hung++;
 		}
 
-		/* The four scripts an emitter's PostLoad walks without asking whether they are there
-		 * (FVersionedNiagaraEmitterData::GetScripts -> EnsureScriptsPostLoaded): the particle spawn and update
-		 * scripts, and the editor-only emitter spawn and update ones a cook doesn't carry. One with no script left
-		 * for it gets an empty one of its usage on the version's source, which the editor compiles from the graph;
-		 * a saved emitter missing one took the editor down on its next load (NS_Emote_StarStray). */
-		const TPair<ENiagaraScriptUsage, const TCHAR*> Required[] = {
-			{ ENiagaraScriptUsage::ParticleSpawnScript, TEXT("SpawnScriptProps") },
-			{ ENiagaraScriptUsage::ParticleUpdateScript, TEXT("UpdateScriptProps") },
-			{ ENiagaraScriptUsage::EmitterSpawnScript, TEXT("EmitterSpawnScriptProps") },
-			{ ENiagaraScriptUsage::EmitterUpdateScript, TEXT("EmitterUpdateScriptProps") },
-		};
-
-		for (const TPair<ENiagaraScriptUsage, const TCHAR*>& Slot : Required) {
-			if (FNiagaraVersions::GetObjectIn(Version, Slot.Value, TEXT("Script")) != nullptr) continue;
-
-			UNiagaraScript* Script = NewObject<UNiagaraScript>(Asset, NAME_None, RF_Transactional);
-			Script->SetUsage(Slot.Key);
-			if (UNiagaraScriptSourceBase* Source = Cast<UNiagaraScriptSourceBase>(Written)) Script->SetLatestSource(Source);
-
-			if (FNiagaraVersions::SetObjectIn(Version, Slot.Value, TEXT("Script"), Script)) Filled++;
-		}
+		Filled += GiveRequiredScripts(Asset, Version, Written);
 
 		if (FNiagaraVersions::GetObject(Version, TEXT("EditorData")) == nullptr && EditorData.IsValidIndex(NextEditorData)) {
 			if (FNiagaraVersions::SetObject(Version, TEXT("EditorData"), EditorData[NextEditorData])) NextEditorData++;

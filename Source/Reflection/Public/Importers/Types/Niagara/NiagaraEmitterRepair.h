@@ -6,6 +6,7 @@
 
 struct FUObjectExportContainer;
 struct FNiagaraGraphStats;
+struct FNiagaraVersion;
 
 /* An emitter's versions filled from what sits under it.
  *
@@ -22,4 +23,12 @@ public:
 	 * how many. A parent's copy names stages and scripts the cook kept only under the emitter made from it, and
 	 * every load of it ensures on such an entry; it plays nothing of them. */
 	static int32 DropScriptlessStages(UObject* Emitter);
+
+	/* Gives one of the emitter's versions the four scripts its PostLoad walks without asking whether they are there
+	 * (FVersionedNiagaraEmitterData::GetScripts -> EnsureScriptsPostLoaded): the particle spawn and update scripts,
+	 * and the editor-only emitter spawn and update ones a cook doesn't carry. One missing gets an empty script of its
+	 * usage on Source, which the editor compiles from the graph; a saved emitter missing one took the editor down on
+	 * its next load (NS_Emote_StarStray). Returns how many were made. The repair calls it for an emitter it fills, and
+	 * the system importer for every emitter in its package, nested ones included. */
+	static int32 GiveRequiredScripts(UObject* Emitter, const FNiagaraVersion& Version, UObject* Source);
 };
