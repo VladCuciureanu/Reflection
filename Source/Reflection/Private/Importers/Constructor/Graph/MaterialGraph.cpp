@@ -380,6 +380,36 @@ namespace {
 		}
 	}
 
+	/* An output per attribute a get node reads, after Outputs[0] (the attributes passed through). The editor builds
+	 * them when the attribute list is edited, and an export doesn't carry them (Fortnite's editor copies name only
+	 * AttributeGetTypes), so a node came out with the one output its constructor gives. Saved like that, its
+	 * PostLoad asserts Outputs.Num() == AttributeGetTypes.Num() + 1 and takes the editor down on the next load of
+	 * anything using it (M_CharacterParent_2023's functions, the effect masters). Named as PostLoad names them.
+	 * Returns whether the outputs changed. */
+	bool CompleteGetMaterialAttributesOutputs(UMaterialExpressionGetMaterialAttributes* Get) {
+		const int32 Wanted = Get->AttributeGetTypes.Num() + 1;
+
+		if (Get->Outputs.Num() == Wanted) {
+			return false;
+		}
+
+		if (Get->Outputs.Num() == 0) {
+			Get->Outputs.Add(FExpressionOutput(TEXT("MaterialAttributes")));
+		}
+
+		Get->Outputs.SetNum(FMath::Min(Get->Outputs.Num(), Wanted));
+
+		while (Get->Outputs.Num() < Wanted) {
+			Get->Outputs.Add(FExpressionOutput());
+		}
+
+		for (int32 Index = 1; Index < Wanted; Index++) {
+			Get->Outputs[Index].OutputName = *FMaterialAttributeDefinitionMap::GetDisplayNameForMaterial(Get->AttributeGetTypes[Index - 1], Get->Material).ToString();
+		}
+
+		return true;
+	}
+
 	/* The same the other way round, with Outputs[0] being the attributes passed through. Fills the
 	 * remap with where each output index ends up, INDEX_NONE for the ones that go. */
 	bool PruneGetMaterialAttributes(UMaterialExpressionGetMaterialAttributes* Get, TArray<int32>& OutRemap) {
@@ -467,6 +497,9 @@ void IMaterialGraph::PruneMissingMaterialAttributes(UObject* Parent, UObject* Ma
 		}
 
 		if (UMaterialExpressionGetMaterialAttributes* Get = Cast<UMaterialExpressionGetMaterialAttributes>(Expression)) {
+			/* First, as pruning finds a pin's output by the attribute it reads */
+			CompleteGetMaterialAttributesOutputs(Get);
+
 			TArray<int32> Remap;
 
 			if (PruneGetMaterialAttributes(Get, Remap)) {
