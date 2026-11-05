@@ -36,6 +36,34 @@ namespace {
 	}
 }
 
+bool INiagaraSystemImporter::Import() {
+	/* The graphs, and the script sources that hold them, come from the package's editor copy. Without one there is
+	 * nothing to give the system's scripts as their source, and an editor project has no use for a system without:
+	 * bringing it up (UpdateSystemAfterLoad, which saving runs through PreSave) ensures on the missing source and
+	 * then reads through it, taking the editor down. FN_ImpactMajor_Burst_Baseline, the performance baseline an
+	 * effect type names, came that way on Fortnite 43.00. Such a system is left out and said so, and a reference to
+	 * it stays empty. */
+	if (FUObjectExportContainer* Container = GetContainer()) {
+		const bool bHasSource = Container->Exports.ContainsByPredicate([](FUObjectExport* Export) {
+			return Export != nullptr && Export->IsJsonValid() && Export->GetType() == TEXT("NiagaraScriptSource");
+		});
+
+		if (!bHasSource) {
+			FImportIssues::Report(
+				EImportIssue::Data,
+				TEXT("No graph to build from"),
+				FString::Printf(TEXT("'%s' came without its editor copy, so it has no graphs for its scripts; the editor can't load a Niagara system like that, so it was left out and references to it are empty."), *GetAssetName())
+			);
+
+			UE_LOG(LogReflection, Warning, TEXT("\"%s\" carries no graph source (no editor copy came across); not built"), *GetAssetName());
+
+			return false;
+		}
+	}
+
+	return IObjectImporter::Import();
+}
+
 void INiagaraSystemImporter::Repair(UObject* Asset) const {
 	FUObjectExportContainer* Container = GetContainer();
 

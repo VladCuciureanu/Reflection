@@ -14,6 +14,10 @@
  * compiled from its graphs, since the compiled data the cook kept is for the game, not the editor. */
 class INiagaraSystemImporter final : public IObjectImporter {
 public:
+	/* Not built at all from a package that carries no graph source: the editor can neither load nor save such a
+	 * system (see the definition), so it is reported and whatever references it is left without it. */
+	virtual bool Import() override;
+
 	virtual void Repair(UObject* Asset) const override;
 
 	virtual void Validate(UObject* Asset) const override;
