@@ -301,6 +301,18 @@ UEdGraph* FBlueprintGraphs::Make(UBlueprint* Blueprint, const FString& Name, con
 		}
 	}
 
+	/* The compiler's own entry point for a widget animation's sequence events (SequenceEvent__ENTRYPOINT<Class>) is
+	 * made again from the event nodes when the blueprint compiles, so it isn't a graph to make. */
+	if (Name.StartsWith(TEXT("SequenceEvent__ENTRYPOINT"))) return nullptr;
+
+	/* Another object of the blueprint's may hold the name already (UE aborts on renaming a graph on top of one): the
+	 * graph is made under a free name instead. */
+	if (StaticFindObjectFast(nullptr, Blueprint, FName(*Making)) != nullptr) {
+		const FName Free = MakeUniqueObjectName(Blueprint, UEdGraph::StaticClass(), FName(*Making));
+		UE_LOG(LogTemp, Warning, TEXT("\"%s\" is taken in %s, so its graph is made as \"%s\""), *Making, *Blueprint->GetName(), *Free.ToString());
+		Making = Free.ToString();
+	}
+
 	UEdGraph* Graph = FBlueprintEditorUtils::CreateNewGraph(Blueprint, FName(*Making), UEdGraph::StaticClass(), UEdGraphSchema_K2::StaticClass());
 
 	if (Graph == nullptr) return nullptr;
