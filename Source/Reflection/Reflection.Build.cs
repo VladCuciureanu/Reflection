@@ -33,6 +33,18 @@ public class Reflection : ModuleRules {
 
 		PublicDefinitions.Add("REFLECTION_CONTROL_RIG=" + (bControlRig ? "1" : "0"));
 
+		/* A widget blueprint's viewmodels and bindings live in the ModelViewViewModel plugin's
+		 * blueprint extension, which is what the view importer rebuilds. It is written against
+		 * 5.8's editor side of it (the conversion function object, its pins and wrapper graphs);
+		 * older engines count as not having it. */
+		var bMVVM = false;
+
+#if UE_5_8_OR_LATER
+		bMVVM = Directory.Exists(Path.Combine(EngineDirectory, "Plugins", "Runtime", "ModelViewViewModel"));
+#endif
+
+		PublicDefinitions.Add("REFLECTION_MVVM=" + (bMVVM ? "1" : "0"));
+
 		/* Drawing a graph is a smaller thing to ask than reading one back.
 		 *
 		 * The rig importer above rebuilds a cooked rig out of its bytecode, and that reads a rig the
@@ -293,6 +305,17 @@ public class Reflection : ModuleRules {
 
 				/* UAnimGraphNode_RigLogic, which is how the node is put in a graph to test it */
 				"RigLogicDeveloper"
+			});
+		}
+
+		if (bMVVM) {
+			PrivateDependencyModuleNames.AddRange(new[] {
+				/* The view's runtime types: the execution modes, field variants and resolvers */
+				"ModelViewViewModel",
+				"FieldNotification",
+
+				/* The blueprint extension, its view, bindings and conversion functions */
+				"ModelViewViewModelBlueprint"
 			});
 		}
 

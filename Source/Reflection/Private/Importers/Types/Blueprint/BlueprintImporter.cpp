@@ -2,6 +2,7 @@
 
 #include "Importers/Types/Blueprint/BlueprintImporter.h"
 #include "Importers/Types/Blueprint/WidgetTreeSource.h"
+#include "Importers/Types/Blueprint/WidgetViewModels.h"
 #include "Engine/Package.h"
 #include "Importers/Types/Blueprint/BlueprintCompile.h"
 #include "AnimationGraphSchema.h"
@@ -162,11 +163,23 @@ bool IBlueprintImporter::Import() {
 	 * variables are worked out below */
 	BorrowWidgetTree();
 
+	/* A widget blueprint's view, read before the variables since what it makes is left out of them */
+	ViewModels = MakeShared<FWidgetViewModels>(GetContainer(), GetAssetExport());
+
 	/* The variables have to exist before their defaults can land anywhere. A recreated blueprint
 	 * only has what its parent class gave it, so any property the blueprint declared itself is
 	 * missing, and deserializing the class default object over it would drop those values on the
-	 * floor without complaining. */
-	if (ConstructVariables() > 0) {
+	 * floor without complaining.
+	 *
+	 * The viewmodels are properties of the class in the same way, made by the view's compile, and
+	 * the defaults can hold an instance of one, so they are added alongside. */
+	int32 Declared = ConstructVariables();
+
+	if (UWidgetBlueprint* WidgetBlueprint = Cast<UWidgetBlueprint>(Blueprint); WidgetBlueprint != nullptr && ViewModels->IsValid()) {
+		Declared += ViewModels->ConstructViewModels(WidgetBlueprint, GetObjectSerializer());
+	}
+
+	if (Declared > 0) {
 		/* Adding a variable only touches the blueprint, the generated class grows the property
 		 * when it recompiles, and the default object below is the one that comes out of that.
 		 *
@@ -401,6 +414,14 @@ int32 IBlueprintImporter::ConstructBody() {
 		}
 	}
 
+	/* The view's bindings, once the functions they convert through and call are on the class. A
+	 * binding names them on the skeleton, which the compile above is what puts them on. */
+	if (UWidgetBlueprint* WidgetBlueprint = Cast<UWidgetBlueprint>(Blueprint); WidgetBlueprint != nullptr && ViewModels.IsValid() && ViewModels->IsValid()) {
+		if (ViewModels->ConstructBindings(WidgetBlueprint) > 0) {
+			CompileBlueprintGuarded(Blueprint, EBlueprintCompileOptions::SkipGarbageCollection);
+		}
+	}
+
 	/* Not new any more.
 	 *
 	 * A blueprint made from nothing is marked as just created, and the editor clears that the first
@@ -626,6 +647,9 @@ int32 IBlueprintImporter::ConstructVariables() {
 	TSet<FString> Components = FBlueprintVariables::GetComponentVariables(GetContainer());
 
 	Components.Append(FBlueprintVariables::GetWidgetVariables(GetContainer()));
+
+	/* And the view's viewmodels, which its compile makes a property for each of */
+	if (ViewModels.IsValid() && ViewModels->IsValid()) Components.Append(ViewModels->GetProperties());
 
 	TArray<TSharedPtr<FJsonValue>> Declared;
 
@@ -1424,6 +1448,9 @@ int32 IBlueprintImporter::ConstructGraphs() {
 
 		/* Written by the compiler for a node to work its inputs out in, rather than by anybody */
 		if (Compilers.Contains(Name)) continue;
+
+		/* Or by the view's compile: a viewmodel's setter, or a conversion that needed a function */
+		if (ViewModels.IsValid() && ViewModels->IsValid() && ViewModels->GetFunctions().Contains(Name)) continue;
 
 		const FUObjectJsonValueExport Function(Export->JsonObject);
 

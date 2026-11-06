@@ -4,6 +4,8 @@
 
 #include "Importers/Constructor/Importer.h"
 
+struct FWidgetViewModels;
+
 class IBlueprintImporter : public IImporter {
 protected:
 	UBlueprint* Blueprint = nullptr;
@@ -54,6 +56,10 @@ protected:
 
 	/* What BorrowWidgetTree brought in, kept for the tree step to use */
 	FUObjectExport* BorrowedWidgetTree = nullptr;
+
+	/* A widget blueprint's viewmodels and bindings, read off the view cooked onto its class. Made
+	 * before the variables, since what the view's compile makes is left out of them and of the graphs */
+	TSharedPtr<FWidgetViewModels> ViewModels;
 
 	/* Lays every function the class carries back out as a graph, read from the bytecode it was
 	 * cooked as. Returns how many nodes it placed across all of them. */
