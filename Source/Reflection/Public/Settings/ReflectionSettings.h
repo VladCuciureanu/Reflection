@@ -71,6 +71,11 @@ public:
 	/* Whether a blueprint gets its graphs. Off, everything else about it comes across and the graphs are left empty. */
 	UPROPERTY(EditAnywhere, DisplayName = "Import Blueprint Code", Config, Category = Settings)
 	bool ImportBlueprintCode = true;
+
+	/* Whether the Content Browser jumps to what an import made. Off, an import made while something else has the
+	 * screen (a game in Play reflecting what it needs) leaves the browser, and the content drawer, alone. */
+	UPROPERTY(EditAnywhere, DisplayName = "Browse to Imported Assets", Config, Category = Settings)
+	bool BrowseToImportedAssets = true;
 };
 
 /* Reconstruction Toolkit for Unreal Engine */

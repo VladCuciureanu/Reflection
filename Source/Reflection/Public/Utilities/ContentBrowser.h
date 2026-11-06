@@ -16,6 +16,7 @@
 #include "AssetRegistry/AssetRegistryModule.h"
 #endif
 #include "Engine/Log.h"
+#include "Settings/ReflectionSettings.h"
 #include "Framework/Application/SlateApplication.h"
 
 #if UE4_25_BELOW
@@ -76,6 +77,14 @@ inline void BrowseToAsset(UObject* Asset) {
 	 * UAssetToolsImpl::ImportAssetsInternal. Left out, a locked Content Browser means
 	 * FindContentBrowserToSync hands back nothing and the jump is dropped without a word. */
 	ContentBrowserModule.Get().SyncBrowserToAssets(Assets, /*bAllowLockedBrowsers=*/ true);
+}
+
+/* The jump at the end of an import, which the settings can turn off (Browse to Imported Assets). What somebody asked to
+ * be shown, from a panel, goes through BrowseToAsset and is shown regardless. */
+inline void BrowseToImportedAsset(UObject* Asset) {
+	if (!GetDefault<UReflectionSettings>()->AssetSettings.BrowseToImportedAssets) return;
+
+	BrowseToAsset(Asset);
 }
 
 /* Get the asset currently selected in the Content Browser. */

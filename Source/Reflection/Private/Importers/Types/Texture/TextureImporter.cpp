@@ -169,7 +169,7 @@ bool FTextureImport::FromExport(const TSharedPtr<FJsonObject>& Export, const FSt
 
 	/* Textures don't go through HandleAssetCreation, so the jump to the asset has to happen here,
 	 * and only where nothing is waiting on it further up */
-	if (FAssetUtilities::ImportDepth <= 1) BrowseToAsset(Texture);
+	if (FAssetUtilities::ImportDepth <= 1) BrowseToImportedAsset(Texture);
 
 	if (Settings->AssetSettings.SaveAssets) {
 		SavePackage(Package);

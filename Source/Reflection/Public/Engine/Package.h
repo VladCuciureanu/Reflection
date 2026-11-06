@@ -200,7 +200,7 @@ inline bool HandleAssetCreation(UObject* Asset, UPackage* Package, const bool bB
 
 	Package->FullyLoad();
 
-	if (bBrowse) BrowseToAsset(Asset);
+	if (bBrowse) BrowseToImportedAsset(Asset);
 
 	if (UVectorFieldStatic* VectorFieldStatic = Cast<UVectorFieldStatic>(Asset)) {
 		VectorFieldStatic->Resource = nullptr;

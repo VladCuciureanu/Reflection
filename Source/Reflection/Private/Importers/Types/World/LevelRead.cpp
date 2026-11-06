@@ -843,7 +843,7 @@ FRLevelReadResult FLevelRead::Read(const TArray<TSharedPtr<FJsonValue>>& Exports
 	World->MarkPackageDirty();
 	Package->SetDirtyFlag(true);
 
-	BrowseToAsset(World);
+	BrowseToImportedAsset(World);
 
 	/* Written out, since a level is opened off disk and an unsaved one left standing is one the open cannot clear */
 	if (GetSettings()->AssetSettings.SaveAssets) {
