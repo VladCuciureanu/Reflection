@@ -1,6 +1,7 @@
 ﻿/* Copyright Reflection Contributors 2024-2026 */
 
 #include "Serializers/PropertySerializer.h"
+#include "Engine/Blueprint.h"
 #include "UObject/PropertyOptional.h"
 
 #include "GameplayTagContainer.h"
@@ -867,6 +868,16 @@ void UPropertySerializer::DeserializePropertyValue(FProperty* Property, const TS
 
 				UE_LOG(LogReflectionPropertySerializer, Warning, TEXT("\"%s\" names %s, and nothing of that came back"),
 					*GetPropertyName(Property).ToString(), Named.IsEmpty() ? TEXT("something it does not name") : *Named);
+
+				/* A class that may only be being made further up: kept, to point again once it is here */
+				const FClassProperty* ClassProperty = CastField<const FClassProperty>(ObjectProperty);
+				UObject* Holder = Filling.Get();
+				FString Path;
+
+				if (ClassProperty != nullptr && Holder != nullptr && JsonValueAsObject->TryGetStringField(TEXT("ObjectPath"), Path)
+					&& Holder->GetClass()->IsChildOf(ClassProperty->GetOwnerClass()) && ClassProperty->ContainerPtrToValuePtr<void>(Holder) == OutValue) {
+					FPendingClassReferences::Add(Holder, ClassProperty, Named, Path);
+				}
 			}
 
 			/* Too extreme it seems */
@@ -1352,3 +1363,94 @@ UE_ENABLE_OPTIMIZATION
 #else
 PRAGMA_ENABLE_OPTIMIZATION
 #endif
+
+namespace {
+	struct FPendingClassReference {
+		TWeakObjectPtr<UObject> Owner;
+		FName Property;
+		FString ObjectName;
+		FString ObjectPath;
+		/* Once found. Kept and asserted again on each later retry: an import still running when it was pointed can
+		 * write its defaults again and empty it (an action bar whose button class came in partway through it). */
+		TWeakObjectPtr<UClass> Resolved;
+		bool bTaken = false;
+	};
+
+	TArray<FPendingClassReference> GPendingClassReferences;
+}
+
+void FPendingClassReferences::Add(UObject* Owner, const FClassProperty* Property, const FString& ObjectName, const FString& ObjectPath) {
+	GPendingClassReferences.Add({ Owner, Property->GetFName(), ObjectName, ObjectPath });
+}
+
+TArray<UObject*> FPendingClassReferences::TakePointed() {
+	TArray<UObject*> Pointed;
+
+	for (FPendingClassReference& Pending : GPendingClassReferences) {
+		if (Pending.Resolved.IsValid() && !Pending.bTaken && Pending.Owner.IsValid()) {
+			Pointed.AddUnique(Pending.Owner.Get());
+			Pending.bTaken = true;
+		}
+	}
+
+	return Pointed;
+}
+
+TArray<UObject*> FPendingClassReferences::Retry() {
+	TArray<UObject*> Changed;
+
+	for (int32 At = GPendingClassReferences.Num() - 1; At >= 0; --At) {
+		FPendingClassReference& Pending = GPendingClassReferences[At];
+		UObject* Owner = Pending.Owner.Get();
+
+		/* A class's defaults are made anew each time its blueprint is built: the one kept may be an old copy by now */
+		if (Owner != nullptr && Owner->HasAnyFlags(RF_ClassDefaultObject)) {
+			if (const UBlueprint* Blueprint = Cast<UBlueprint>(Owner->GetClass()->ClassGeneratedBy)) {
+				if (Blueprint->GeneratedClass != nullptr && Blueprint->GeneratedClass->GetDefaultObject(false) != nullptr) {
+					Owner = Blueprint->GeneratedClass->GetDefaultObject(false);
+					Pending.Owner = Owner;
+				}
+			}
+		}
+		FClassProperty* Property = Owner != nullptr ? CastField<FClassProperty>(Owner->GetClass()->FindPropertyByName(Pending.Property)) : nullptr;
+
+		if (Property == nullptr || (!Pending.Resolved.IsValid() && Property->GetObjectPropertyValue_InContainer(Owner) != nullptr)) {
+			GPendingClassReferences.RemoveAt(At);
+			continue;
+		}
+
+		if (Pending.Resolved.IsValid()) {
+			if (Property->GetObjectPropertyValue_InContainer(Owner) == nullptr) {
+				Property->SetObjectPropertyValue_InContainer(Owner, Pending.Resolved.Get());
+				Changed.AddUnique(Owner);
+				Pending.bTaken = false;
+
+				UE_LOG(LogReflectionPropertySerializer, Display, TEXT("%s.%s was emptied again after it was pointed at %s, and pointed again"), *Owner->GetName(), *Pending.Property.ToString(), *Pending.Resolved->GetName());
+			}
+
+			continue;
+		}
+
+		/* WidgetBlueprintGeneratedClass'Name_C' at /Path/Package.<index> */
+		FString Name = Pending.ObjectName, Package = Pending.ObjectPath;
+
+		if (int32 Quote; Name.FindChar(TEXT('\''), Quote)) {
+			Name = Name.Mid(Quote + 1);
+			Name.RemoveFromEnd(TEXT("'"));
+		}
+
+		if (int32 Dot; Package.FindLastChar(TEXT('.'), Dot) && !Package.StartsWith(TEXT("/Script/"))) Package.LeftInline(Dot);
+
+		UClass* Class = LoadObject<UClass>(nullptr, *(ToEditorPackagePath(Package) + TEXT(".") + Name), nullptr, LOAD_NoWarn | LOAD_Quiet);
+
+		if (Class == nullptr || !Class->IsChildOf(Property->MetaClass)) continue;
+
+		Property->SetObjectPropertyValue_InContainer(Owner, Class);
+		Changed.AddUnique(Owner);
+		Pending.Resolved = Class;
+
+		UE_LOG(LogReflectionPropertySerializer, Display, TEXT("%s.%s pointed at %s, which was still being made when it was read"), *Owner->GetName(), *Pending.Property.ToString(), *Class->GetName());
+	}
+
+	return Changed;
+}

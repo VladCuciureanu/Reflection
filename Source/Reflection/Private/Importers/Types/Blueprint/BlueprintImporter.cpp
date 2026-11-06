@@ -3,6 +3,8 @@
 #include "Importers/Types/Blueprint/BlueprintImporter.h"
 #include "Importers/Types/Blueprint/WidgetTreeSource.h"
 #include "Importers/Types/Blueprint/WidgetViewModels.h"
+#include "Utilities/AssetPaths.h"
+#include "Serializers/PropertySerializer.h"
 #include "Engine/Package.h"
 #include "Importers/Types/Blueprint/BlueprintCompile.h"
 #include "AnimationGraphSchema.h"
@@ -45,6 +47,43 @@
 #include "Importers/Types/Blueprint/BlueprintCookedMetaData.h"
 #include "Importers/Types/Blueprint/BytecodeGraph.h"
 #include "Importers/Constructor/TypesHelper.h"
+
+namespace {
+	/* Points an object's empty class properties at the classes its export names for them, where those are here now.
+	 * WidgetBlueprintGeneratedClass'Name_C' at /Path/Package.<index>. Answers how many it pointed. */
+	int32 RepointClasses(UObject* Object, const TSharedPtr<FJsonObject>& Properties) {
+		int32 Pointed = 0;
+
+		if (Object == nullptr || !Properties.IsValid()) return 0;
+
+		for (const TPair<FString, TSharedPtr<FJsonValue>>& Field : Properties->Values) {
+			FClassProperty* Property = CastField<FClassProperty>(Object->GetClass()->FindPropertyByName(*Field.Key));
+			const TSharedPtr<FJsonObject> Reference = Field.Value.IsValid() && Field.Value->Type == EJson::Object ? Field.Value->AsObject() : nullptr;
+
+			if (Property == nullptr || !Reference.IsValid() || Property->GetObjectPropertyValue_InContainer(Object) != nullptr) continue;
+
+			FString Named = Reference->GetStringField(TEXT("ObjectName")), Package = Reference->GetStringField(TEXT("ObjectPath"));
+
+			if (int32 Quote; Named.FindChar(TEXT('\''), Quote)) {
+				Named = Named.Mid(Quote + 1);
+				Named.RemoveFromEnd(TEXT("'"));
+			}
+
+			if (int32 Dot; Package.FindLastChar(TEXT('.'), Dot) && !Package.StartsWith(TEXT("/Script/"))) LeftInline(Package, Dot);
+
+			UClass* Class = LoadObject<UClass>(nullptr, *(ToEditorPackagePath(Package) + TEXT(".") + Named), nullptr, LOAD_NoWarn | LOAD_Quiet);
+
+			if (Class != nullptr && Class->IsChildOf(Property->MetaClass)) {
+				Property->SetObjectPropertyValue_InContainer(Object, Class);
+				Pointed++;
+
+				UE_LOG(LogReflection, Display, TEXT("%s.%s pointed at %s again, which was still being made when it was read"), *Object->GetName(), *Field.Key, *Class->GetName());
+			}
+		}
+
+		return Pointed;
+	}
+}
 
 UObject* IBlueprintImporter::CreateAsset(UObject* CreatedAsset) {
 	UClass* Class = GetAssetClass();
@@ -233,6 +272,105 @@ bool IBlueprintImporter::Import() {
 	/* Both put back a node the compiler makes its binding from, so the class is built again */
 	if (ConstructAnimationEvents() + ConstructComponentEvents() > 0) {
 		CompileBlueprintGuarded(Blueprint, EBlueprintCompileOptions::SkipGarbageCollection);
+	}
+
+	/* Class references that came out empty because the class is a blueprint that was still being made when they were
+	 * read: a list's entry widget in the tree, an action bar's button class in the defaults. It is here now, so they
+	 * are pointed at it again, and the class built once more so it carries them. */
+	/* And the ones any import before this one read too early (FPendingClassReferences): an inner import finishes
+	 * first, so by now what it waited on may be here. Each blueprint they belong to is built again to carry them. */
+	{
+		/* A blueprint finished (and saved) before now: built again and saved again, or the fix stays in memory */
+		TArray<UBlueprint*> Holders;
+		const auto HolderOf = [](const UObject* Object) -> UBlueprint* {
+			if (Object->HasAnyFlags(RF_ClassDefaultObject)) return Cast<UBlueprint>(Object->GetClass()->ClassGeneratedBy);
+			if (UBlueprint* Outer = Object->GetTypedOuter<UBlueprint>()) return Outer;
+			const UClass* Generated = Object->GetTypedOuter<UClass>();
+			return Generated != nullptr ? Cast<UBlueprint>(Generated->ClassGeneratedBy) : nullptr;
+		};
+
+		for (UObject* Changed : FPendingClassReferences::Retry()) {
+			if (UBlueprint* Holder = HolderOf(Changed)) Holders.AddUnique(Holder);
+			if (!Changed->HasAnyFlags(RF_ClassDefaultObject)) continue;
+
+			/* Widgets of that class already in other blueprints' trees took the defaults while they were empty */
+			for (TObjectIterator<UWidget> It; It; ++It) {
+				UWidget* Widget = *It;
+				if (Widget->GetClass() != Changed->GetClass() || Widget->HasAnyFlags(RF_ClassDefaultObject) || Widget->GetTypedOuter<UWidgetTree>() == nullptr) continue;
+
+				bool bCopied = false;
+				for (TFieldIterator<FClassProperty> Field(Widget->GetClass()); Field; ++Field) {
+					if (Field->GetObjectPropertyValue_InContainer(Widget) == nullptr && Field->GetObjectPropertyValue_InContainer(Changed) != nullptr) {
+						Field->SetObjectPropertyValue_InContainer(Widget, Field->GetObjectPropertyValue_InContainer(Changed));
+						bCopied = true;
+					}
+				}
+
+				if (UBlueprint* Holder = bCopied ? HolderOf(Widget) : nullptr) Holders.AddUnique(Holder);
+			}
+		}
+
+		/* The outermost import ends last: everything pointed during it is saved once more, in case its own import was
+		 * still going and wrote its package before the pointing */
+		if (FAssetUtilities::ImportDepth <= 1) {
+			for (UObject* Pointed : FPendingClassReferences::TakePointed()) {
+				if (UBlueprint* Holder = HolderOf(Pointed)) {
+					Holders.AddUnique(Holder);
+					UE_LOG(LogReflection, Display, TEXT("\"%s\" is built and saved again for the class references pointed during this import"), *Holder->GetName());
+				}
+			}
+		}
+
+		for (UBlueprint* Holder : Holders) {
+			if (Holder == Blueprint) continue;
+
+			FBlueprintEditorUtils::MarkBlueprintAsModified(Holder);
+			CompileBlueprintGuarded(Holder, EBlueprintCompileOptions::SkipGarbageCollection);
+
+			if (IsBlueprintClassBuilt(Holder) && GetSettings()->AssetSettings.SaveAssets) SavePackage(Holder->GetPackage());
+		}
+	}
+
+	{
+		int32 Pointed = 0;
+		UWidgetBlueprint* WidgetBlueprint = Cast<UWidgetBlueprint>(Blueprint);
+
+		for (const FUObjectExport* Export : GetContainer()->Exports) {
+			if (WidgetBlueprint == nullptr || WidgetBlueprint->WidgetTree == nullptr) break;
+			if (Export == nullptr || !Export->IsJsonValid() || !Export->JsonObject->HasTypedField<EJson::Object>(TEXT("Properties"))) continue;
+
+			const TSharedPtr<FJsonObject>* Outer;
+
+			if (!Export->JsonObject->TryGetObjectField(TEXT("Outer"), Outer) || !(*Outer)->GetStringField(TEXT("ObjectName")).StartsWith(TEXT("WidgetTree'"))) continue;
+
+			if (UWidget* Widget = WidgetBlueprint->WidgetTree->FindWidget(Export->GetName())) {
+				Pointed += RepointClasses(Widget, Export->JsonObject->GetObjectField(TEXT("Properties")));
+
+				/* One the widget never set itself and took from its class's defaults, which were still empty when the
+				 * widget was made (a blueprint over a native widget, as an action bar is) */
+				if (const UObject* Defaults = Widget->GetClass()->GetDefaultObject(false)) {
+					for (TFieldIterator<FClassProperty> It(Widget->GetClass()); It; ++It) {
+						if (It->GetObjectPropertyValue_InContainer(Widget) == nullptr && It->GetObjectPropertyValue_InContainer(Defaults) != nullptr) {
+							It->SetObjectPropertyValue_InContainer(Widget, It->GetObjectPropertyValue_InContainer(Defaults));
+							Pointed++;
+						}
+					}
+				}
+			}
+		}
+
+		if (Blueprint->GeneratedClass != nullptr) {
+			FUObjectExport* Defaults = GetClassDefaultObject(GetContainer(), GetAssetDataAsValue());
+
+			if (Defaults != nullptr && Defaults->IsJsonValid() && Defaults->JsonObject->HasTypedField<EJson::Object>(TEXT("Properties"))) {
+				Pointed += RepointClasses(Blueprint->GeneratedClass->GetDefaultObject(), Defaults->JsonObject->GetObjectField(TEXT("Properties")));
+			}
+		}
+
+		if (Pointed > 0) {
+			FBlueprintEditorUtils::MarkBlueprintAsModified(Blueprint);
+			CompileBlueprintGuarded(Blueprint, EBlueprintCompileOptions::SkipGarbageCollection);
+		}
 	}
 
 	/* Which graphs were open the last time somebody had it up, which is kept as a path to each one.
@@ -1297,6 +1435,30 @@ void IBlueprintImporter::ConstructWidgetTree() {
 		Binding.Kind = Kind.EndsWith(TEXT("Property")) ? EBindingKind::Property : EBindingKind::Function;
 
 		WidgetBlueprint->Bindings.Add(Binding);
+	}
+
+	/* Which widgets are variables. That is the designer's to say and isn't cooked, and a widget made here starts with
+	 * its class's default, which for a panel or a text block is no. The class the blueprint was cooked to says it
+	 * anyway: a widget is a variable exactly where the class declares a property of its name, and the graphs that
+	 * read the widget read that property. */
+	if (WidgetBlueprint->WidgetTree != nullptr) {
+		TSet<FString> Declared;
+
+		for (const TSharedPtr<FJsonValue>& Value : FBlueprintVariables::GetDeclared(GetAssetExport(), GetContainer())) {
+			FString Name;
+
+			if (Value.IsValid() && Value->AsObject().IsValid() && Value->AsObject()->TryGetStringField(TEXT("Name"), Name)) Declared.Add(Name);
+		}
+
+		/* Or one a class above declares, a native one binding it (BindWidget): the widget compiler binds it to that
+		 * property rather than making another */
+		const UClass* Parent = WidgetBlueprint->ParentClass;
+
+		WidgetBlueprint->WidgetTree->ForEachWidget([&Declared, Parent](UWidget* Widget) {
+			if (Widget != nullptr) {
+				Widget->bIsVariable = Declared.Contains(Widget->GetName()) || (Parent != nullptr && Parent->FindPropertyByName(Widget->GetFName()) != nullptr);
+			}
+		});
 	}
 }
 namespace {

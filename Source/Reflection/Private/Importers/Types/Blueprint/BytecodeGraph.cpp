@@ -58,6 +58,7 @@
 #include "K2Node_AssignmentStatement.h"
 #include "K2Node_MathExpression.h"
 #include "K2Node_MakeStruct.h"
+#include "K2Node_MakeSet.h"
 #include "K2Node_SetFieldsInStruct.h"
 #include "Kismet/KismetTextLibrary.h"
 #include "K2Node_Select.h"
@@ -209,7 +210,12 @@ namespace {
 
 			UScriptStruct* Struct = FindStructAnywhere(Owner);
 
-			if (Struct == nullptr) return false;
+			/* One a blueprint declared (a user-defined struct) that nothing has brought in yet. The variable typer
+			 * fetches it from where the property says it lives; a struct only a function's local is of is otherwise
+			 * never asked for, and the local, and every read of it, goes. */
+			if (Struct == nullptr) {
+				return Property.JsonObject.IsValid() && FBlueprintVariables::GetPinType(Property.JsonObject, OutType, Container);
+			}
 
 			OutType.PinCategory = UEdGraphSchema_K2::PC_Struct;
 			OutType.PinSubCategoryObject = Struct;
@@ -1291,7 +1297,7 @@ bool FBytecodeGraph::IsMade(const FString& Name) const {
 	 * honest reading, but the event graph cannot keep one: a local lives on a function's entry
 	 * node and there is no entry node here. Elsewhere rather than written as something that does not
 	 * exist, and said out loud, since what it really means is a macro nobody has read back yet. */
-	if (Name.StartsWith(TEXT("Temp_")) && !HoldsLocals()) return true;
+	if (Name.StartsWith(TEXT("Temp_"), ESearchCase::CaseSensitive) && !HoldsLocals()) return true;
 
 	return false;
 }
@@ -1303,7 +1309,7 @@ bool FBytecodeGraph::HasLocal(const FString& Name) const {
 }
 
 bool FBytecodeGraph::KeepsTemporary(const FString& Name) const {
-	if (HoldsLocals() || !Name.StartsWith(TEXT("Temp_"))) return false;
+	if (HoldsLocals() || !Name.StartsWith(TEXT("Temp_"), ESearchCase::CaseSensitive)) return false;
 
 	/* A macro that was read back holds its own */
 	if (Owned.Contains(Name)) return false;
@@ -1342,6 +1348,96 @@ UEdGraphPin* FBytecodeGraph::Temporary(const FString& Name, const FUObjectJsonVa
 	return Node->GetVariablePin();
 }
 
+UEdGraphPin* FBytecodeGraph::StandInFor(const FUObjectJsonValueExport& Argument) {
+	const FString Token = MacroReading::TokenOf(Argument);
+
+	if ((Token != TEXT("EX_LocalVariable") && Token != TEXT("EX_LocalOutVariable")) || !Argument.Has(TEXT("Variable"))) return nullptr;
+
+	const FUObjectJsonValueExport Variable = Argument.GetObject(TEXT("Variable"));
+	const FString Name = MacroReading::NamedProperty(Variable);
+	const FUObjectJsonValueExport Property = Variable.Has(TEXT("Property")) ? Variable.GetObject(TEXT("Property")) : Variable;
+
+	/* A parameter the function was handed by reference (a const delegate, a struct), which reads as out because it is
+	 * one in the signature: the entry node hands it out under its own name */
+	if (Graph != nullptr && !Name.IsEmpty()) {
+		for (UEdGraphNode* Node : Graph->Nodes) {
+			if (UK2Node_FunctionEntry* Entry = Cast<UK2Node_FunctionEntry>(Node)) {
+				if (UEdGraphPin* Parameter = Entry->FindPin(*Name, EGPD_Output)) return Parameter;
+			}
+		}
+	}
+
+	FEdGraphPinType Type;
+
+	if (Name.IsEmpty()) return nullptr;
+
+	const bool bTyped = TypeOfProperty(Property, Type, Container);
+
+	/* A Make node the compiler had nothing to write for: its local is the node's output, still at its defaults. A
+	 * struct a blueprint declared (a user-defined one) is found from where the property says it lives. */
+	if (Name.StartsWith(TEXT("K2Node_MakeStruct_"))) {
+		UScriptStruct* Struct = bTyped && Type.PinCategory == UEdGraphSchema_K2::PC_Struct ? Cast<UScriptStruct>(Type.PinSubCategoryObject.Get()) : nullptr;
+
+		if (Struct == nullptr && Property.Has(TEXT("Struct"))) {
+			const FUObjectJsonValueExport Named = Property.GetObject(TEXT("Struct"));
+			FString Path = Named.GetString(TEXT("ObjectPath")), Owner, Member;
+
+			if (int32 Dot; Path.FindLastChar(TEXT('.'), Dot) && !Path.StartsWith(TEXT("/Script/"))) Path.LeftInline(Dot);
+
+			SplitReference(Named, Owner, Member);
+			const FString Short = Member.IsEmpty() ? Owner : Member;
+
+			Struct = LoadObject<UScriptStruct>(nullptr, *(Path + TEXT(".") + Short), nullptr, LOAD_NoWarn | LOAD_Quiet);
+		}
+
+		if (Struct != nullptr) {
+			UK2Node_MakeStruct* Node = AddNode<UK2Node_MakeStruct>();
+
+			Node->StructType = Struct;
+			Node->AllocateDefaultPins();
+
+			for (UEdGraphPin* Out : Node->Pins) {
+				if (Out != nullptr && Out->Direction == EGPD_Output) return Out;
+			}
+		}
+	}
+
+	if (!bTyped) return nullptr;
+
+	if (Type.ContainerType == EPinContainerType::Array && Name.StartsWith(TEXT("K2Node_MakeArray_"))) {
+		UK2Node_MakeArray* Node = AddNode<UK2Node_MakeArray>();
+
+		Node->NumInputs = 0;
+		Node->AllocateDefaultPins();
+
+		return Node->GetOutputPin();
+	}
+
+	if (Type.ContainerType == EPinContainerType::Set && Name.StartsWith(TEXT("K2Node_MakeSet_"))) {
+		UK2Node_MakeSet* Node = AddNode<UK2Node_MakeSet>();
+
+		Node->NumInputs = 0;
+		Node->AllocateDefaultPins();
+
+		return Node->GetOutputPin();
+	}
+
+	/* Anything else is a local the function declared and nobody set, which a function can hold and read back */
+	const bool bFunction = Graph != nullptr && Graph->Nodes.ContainsByPredicate([](const UEdGraphNode* Node) { return Node != nullptr && Node->IsA<UK2Node_FunctionEntry>(); });
+
+	if (bFunction && EnsureLocal(Name, Property)) {
+		UK2Node_VariableGet* Reading = AddNode<UK2Node_VariableGet>();
+
+		PointAtLocal(Reading, Name);
+		Reading->AllocateDefaultPins();
+
+		return Reading->FindPin(*Name, EGPD_Output);
+	}
+
+	/* An event's, which is the ubergraph's to keep and has no local of its own: a Local node holds it */
+	return Temporary(Name, Property);
+}
+
 bool FBytecodeGraph::EnsureLocal(const FString& Name, const FUObjectJsonValueExport& Property) {
 	UBlueprint* Blueprint = Graph != nullptr ? Graph->GetTypedOuter<UBlueprint>() : nullptr;
 
@@ -1376,6 +1472,20 @@ FBytecodeGraph::FValue FBytecodeGraph::ReadVariable(const FUObjectJsonValueExpor
 	 * the parameter. */
 	const bool bReadsMember = MacroReading::TokenOf(Expression) == TEXT("EX_InstanceVariable");
 
+	/* A parameter taken by const reference (a delegate, a struct) is read as an out local, since that is how it is
+	 * passed, and it is the caller's: the entry node hands it out under its name */
+	if (MacroReading::TokenOf(Expression) == TEXT("EX_LocalOutVariable") && Graph != nullptr) {
+		for (UEdGraphNode* Node : Graph->Nodes) {
+			if (UK2Node_FunctionEntry* Entry = Cast<UK2Node_FunctionEntry>(Node)) {
+				if (UEdGraphPin* Parameter = Entry->FindPin(*Name, EGPD_Output)) {
+					Value.Pin = Parameter;
+
+					return Value;
+				}
+			}
+		}
+	}
+
 	/* A timeline keeps each track in a member of the class, so the script reads one as a member. The editor only
 	 * hands a track out through the timeline's own pin, and a member read of it does not compile, so a track is
 	 * read off its pin before the member reads below are asked. */
@@ -1408,6 +1518,30 @@ FBytecodeGraph::FValue FBytecodeGraph::ReadVariable(const FUObjectJsonValueExpor
 	 * one. Taken off the entry node instead, every place it is read draws another line back across
 	 * the whole graph to the one node, which is not how anybody lays one out. */
 	if (Handouts.Contains(Name) && !bReadsMember) {
+		/* A parameter has no local of its own to point a read at, and a read pointed at nothing by that name is a read
+		 * of whatever member answers to it, which a redirect can rename out from under it (Opacity on a widget is
+		 * RenderOpacity). Taken off the entry node it is the parameter. */
+		const UBlueprint* Owning = Graph->GetTypedOuter<UBlueprint>();
+
+		UClass* Answers = Owning != nullptr ? (Owning->SkeletonGeneratedClass != nullptr ? Owning->SkeletonGeneratedClass.Get() : Owning->GeneratedClass.Get()) : nullptr;
+		bool bShadowed = false;
+
+		for (UClass* Scan = Answers; Scan != nullptr && !bShadowed; Scan = Scan->GetSuperClass()) {
+			bShadowed = Scan->FindPropertyByName(*Name) != nullptr || !FProperty::FindRedirectedPropertyName(Scan, *Name).IsNone();
+		}
+
+		if (bShadowed && !FBlueprintEditorUtils::FindLocalVariableGuidByName(Owning, Graph, *Name).IsValid()) {
+			for (UEdGraphNode* Node : Graph->Nodes) {
+				if (UK2Node_FunctionEntry* Entry = Cast<UK2Node_FunctionEntry>(Node)) {
+					if (UEdGraphPin* Parameter = Entry->FindPin(*Name, EGPD_Output)) {
+						Value.Pin = Parameter;
+
+						return Value;
+					}
+				}
+			}
+		}
+
 		UK2Node_VariableGet* Reading = AddNode<UK2Node_VariableGet>();
 
 		PointAtLocal(Reading, Name);
@@ -2371,6 +2505,19 @@ FBytecodeGraph::FValue FBytecodeGraph::ReadExpression(const FUObjectJsonValueExp
 
 	/* A call reached for its value, which is the pin it returns on */
 	if (Token == TEXT("EX_CallMath") || Token == TEXT("EX_FinalFunction") || Token == TEXT("EX_LocalFinalFunction") || Token == TEXT("EX_VirtualFunction") || Token == TEXT("EX_LocalVirtualFunction")) {
+		/* A float vector widened or narrowed where it meets a double one (ConvertFVector2dToFVector2f and the like).
+		 * The compiler writes the call in for a pin of one width wired to a pin of the other, nobody draws it, and
+		 * the engine won't have it drawn ("should not be called from a Blueprint"). Read through to its argument,
+		 * the compile puts it back. */
+		if (Token == TEXT("EX_CallMath") && Expression.Has(TEXT("Parameters")) && Expression.GetArray(TEXT("Parameters")).Num() == 1) {
+			const FString Called = Expression.Has(TEXT("Function")) && Expression.JsonObject->HasTypedField<EJson::Object>(TEXT("Function"))
+				? Expression.GetObject(TEXT("Function")).GetString(TEXT("ObjectName")) : FString();
+
+			if (Called.Contains(TEXT(":ConvertF")) && (Called.EndsWith(TEXT("d'")) || Called.EndsWith(TEXT("f'")))) {
+				return Read(Expression.GetArray(TEXT("Parameters"))[0]);
+			}
+		}
+
 		if (UK2Node* Node = PlaceCall(Expression, nullptr)) {
 			Value.Pin = HandsBack(Node);
 		}
@@ -3050,6 +3197,42 @@ UK2Node* FBytecodeGraph::PlaceCall(const FUObjectJsonValueExport& Expression, UE
 		}
 	}
 
+	/* Setting a FieldNotify variable is not a call in a graph either.
+	 *
+	 * The node is a plain Set of the variable, and the compiler writes it as SetPropertyValueAndBroadcast(by reference,
+	 * the variable, the new value, ...) so whatever watches the field hears of it. Read back as that call, its two
+	 * wildcards are typed by nothing (a Select is wired into one) and the graph won't compile; read back as the Set, the
+	 * compile writes the same call again. */
+	if (Function->GetOwnerClass() != nullptr && Function->GetOwnerClass()->GetName() == TEXT("FieldNotificationLibrary")
+		&& Function->GetName().StartsWith(TEXT("SetPropertyValueAndBroadcast")) && Expression.Has(TEXT("Parameters"))) {
+		const TArray<FUObjectJsonValueExport> Arguments = Expression.GetArray(TEXT("Parameters"));
+
+		if (Arguments.Num() >= 3) {
+			FUObjectJsonValueExport Old = Arguments[1];
+
+			if (MacroReading::TokenOf(Old) == TEXT("EX_Context") && MacroReading::TokenOf(Old.GetObject(TEXT("ObjectExpression"))) == TEXT("EX_Self")) {
+				Old = Old.GetObject(TEXT("ContextExpression"));
+			}
+
+			const FString Member = MacroReading::TokenOf(Old) == TEXT("EX_InstanceVariable") ? MacroReading::NamedProperty(Old.GetObject(TEXT("Variable"))) : FString();
+
+			if (!Member.IsEmpty()) {
+				UK2Node_VariableSet* Setting = AddNode<UK2Node_VariableSet>();
+
+				Setting->VariableReference.SetSelfMember(*Member);
+				Setting->AllocateDefaultPins();
+
+				if (UEdGraphPin* Pin = Setting->FindPin(*Member, EGPD_Input)) Give(Read(Arguments[2]), Pin);
+
+				ChainExecution(Setting);
+
+				Placed++;
+
+				return Setting;
+			}
+		}
+	}
+
 	/* Filling words in is not a call in a graph.
 	 *
 	 * Format Text is one node with a pin for every {name} in the words it fills in. The compiler
@@ -3088,6 +3271,21 @@ UK2Node* FBytecodeGraph::PlaceCall(const FUObjectJsonValueExport& Expression, UE
 			Adding->TemplateType = Kind;
 
 			Node = Adding;
+		}
+	}
+
+	/* The parent of an interface's event, called from the blueprint's own answer to it. An interface carries no body
+	 * to call, the call does nothing, and 5.8 won't have one drawn ("should not be called from a Blueprint"), so it is
+	 * left out and the run carries on past it. */
+	if (Node == nullptr && Target == nullptr && Function->GetOwnerClass() != nullptr && Function->GetOwnerClass()->HasAnyClassFlags(CLASS_Interface)
+		&& Function->HasAnyFunctionFlags(FUNC_BlueprintEvent) && Graph != nullptr) {
+		const FString CallToken = Expression.Has(TEXT("Token")) ? Expression.GetString(TEXT("Token")) : FString();
+
+		if (CallToken == TEXT("EX_FinalFunction") || CallToken == TEXT("EX_LocalFinalFunction")) {
+			UE_LOG(LogReflectionBytecode, Display, TEXT("\"%s\" calls its interface's own \"%s\", which has nothing to run, so the call was left out"),
+				*Graph->GetName(), *Function->GetName());
+
+			return nullptr;
 		}
 	}
 
@@ -3292,6 +3490,20 @@ UK2Node* FBytecodeGraph::PlaceCall(const FUObjectJsonValueExport& Expression, UE
 		}
 
 		Give(this->Read(Value), Pin);
+
+		/* Handed a local nothing writes: a by-reference pin cannot be left without one, and a Make node's local is
+		 * what the node stood for wherever it went (a wildcard pin taking a struct isn't marked by reference) */
+		const bool bMade = MacroReading::NamedProperty(Value.Has(TEXT("Variable")) ? Value.GetObject(TEXT("Variable")) : Value).StartsWith(TEXT("K2Node_Make"));
+
+		if ((Pin->PinType.bIsReference || bMade) && Pin->LinkedTo.Num() == 0) {
+			UEdGraphPin* Held = StandInFor(Value);
+
+			if (Held != nullptr) Connect(Held, Pin);
+
+			UE_LOG(LogReflectionBytecode, Display, TEXT("\"%s\" takes \"%s\" by reference from \"%s\" (%s): stood in by %s, %s"),
+				*Function->GetName(), *Pin->PinName.ToString(), *MacroReading::NamedProperty(Value.Has(TEXT("Variable")) ? Value.GetObject(TEXT("Variable")) : Value),
+				*MacroReading::TokenOf(Value), Held != nullptr ? *Held->GetOwningNode()->GetName() : TEXT("nothing"), Pin->LinkedTo.Num() > 0 ? TEXT("linked") : TEXT("not linked"));
+		}
 	}
 
 	/* One node with several targets compiles to a call each, back to back. A call matching the one
@@ -3474,6 +3686,27 @@ void FBytecodeGraph::Connect(UEdGraphPin* From, UEdGraphPin* To) {
 	 * and goes everywhere else. */
 	if (Schema->IsSelfPin(*To) && !To->GetOwningNode()->IsA<UK2Node_CallFunction>()) {
 		if (UK2Node_Self* Itself = Cast<UK2Node_Self>(From->GetOwningNode())) {
+			/* A member read or written off a class above this one, through self. The node names the class that
+			 * declares the member, and a node that names a class wants its target: left empty, the compiler takes it
+			 * for a target that was purged ("uses an invalid target"). Pointed at this blueprint instead, the member
+			 * is its own, which is what the empty pin then says. */
+			if (UK2Node_Variable* Variable = Cast<UK2Node_Variable>(To->GetOwningNode()); Variable != nullptr && !Variable->VariableReference.IsSelfContext()) {
+				const UClass* Declares = Variable->VariableReference.GetMemberParentClass();
+				/* The generated class, whose supers are the parents' generated classes the node names (a skeleton's are
+				 * the parents' skeletons) */
+				const UBlueprint* Owning = FBlueprintEditorUtils::FindBlueprintForGraph(Graph);
+				const UClass* Mine = Owning != nullptr ? (Owning->GeneratedClass != nullptr ? Owning->GeneratedClass.Get() : Owning->SkeletonGeneratedClass.Get()) : nullptr;
+
+				if (Declares != nullptr && Mine != nullptr && Mine->IsChildOf(Declares)) {
+					Variable->VariableReference.SetSelfMember(Variable->VariableReference.GetMemberName());
+					To->bHidden = true;
+				} else {
+					Schema->TryCreateConnection(From, To);
+
+					return;
+				}
+			}
+
 			/* Unless something else is reading it, in which case it is drawn for their sake */
 			if (From->LinkedTo.Num() == 0) Graph->RemoveNode(Itself);
 
@@ -3484,6 +3717,28 @@ void FBytecodeGraph::Connect(UEdGraphPin* From, UEdGraphPin* To) {
 	/* Asked of the schema rather than forced, so a pair that wants a conversion between them gets
 	 * one instead of a link the compiler will refuse later */
 	if (Schema->TryCreateConnection(From, To)) return;
+
+	if (Schema->IsSelfPin(*To)) {
+		UE_LOG(LogReflectionBytecode, Display, TEXT("\"%s\" refused %s (%s) as its target: %s"), *To->GetOwningNode()->GetName(),
+			*GetPathNameSafe(From->PinType.PinSubCategoryObject.Get()), *From->PinType.PinCategory.ToString(), *GetPathNameSafe(To->PinType.PinSubCategoryObject.Get()));
+	}
+
+	/* One blueprint class on both ends, as two of its copies: the skeleton a pin was typed by while its blueprint was
+	 * still being built, and the class it compiled to. The schema compares the copies, the compile compares the class,
+	 * so the two are linked when the class they stand for fits. */
+	{
+		const UClass* Gives = Cast<UClass>(From->PinType.PinSubCategoryObject.Get());
+		const UClass* Takes = Cast<UClass>(To->PinType.PinSubCategoryObject.Get());
+
+		if (Gives != nullptr && Takes != nullptr && From->PinType.PinCategory == To->PinType.PinCategory
+			&& (From->PinType.PinCategory == UEdGraphSchema_K2::PC_Object || From->PinType.PinCategory == UEdGraphSchema_K2::PC_Interface)
+			&& (Gives->ClassGeneratedBy != nullptr || Takes->ClassGeneratedBy != nullptr)
+			&& const_cast<UClass*>(Gives)->GetAuthoritativeClass()->IsChildOf(const_cast<UClass*>(Takes)->GetAuthoritativeClass())) {
+			From->MakeLinkTo(To);
+
+			return;
+		}
+	}
 
 	/* The bytecode says what a call was made against and not what it was read as, so a value that
 	 * arrives wider than the pin taking it was cast in the graph and has to be cast again here.
@@ -4373,6 +4628,15 @@ bool FBytecodeGraph::Place(const FUObjectJsonValueExport& Statement) {
 			const FValue Bound = Read(Statement.GetObject(TEXT("Delegate")));
 
 			if (Bound.Pin != nullptr && Node->GetDelegatePin() != nullptr) Connect(Bound.Pin, Node->GetDelegatePin());
+
+			if (Node->GetDelegatePin() == nullptr || Node->GetDelegatePin()->LinkedTo.Num() == 0) {
+				UE_LOG(LogReflectionBytecode, Warning, TEXT("\"%s\": the delegate bound to \"%s\" was left unlinked (read %s, pin %s of %s, delegate pin %s)"),
+					Graph != nullptr ? *Graph->GetName() : TEXT("?"), *Node->GetNodeTitle(ENodeTitleType::ListView).ToString(),
+					*MacroReading::TokenOf(Statement.GetObject(TEXT("Delegate"))),
+					Bound.Pin != nullptr ? *Bound.Pin->PinName.ToString() : TEXT("none"),
+					Bound.Pin != nullptr && Bound.Pin->GetOwningNode() != nullptr ? *Bound.Pin->GetOwningNode()->GetClass()->GetName() : TEXT("-"),
+					Node->GetDelegatePin() != nullptr ? *Node->GetDelegatePin()->PinType.PinCategory.ToString() : TEXT("none"));
+			}
 		}
 
 		ChainExecution(Node);
@@ -4916,7 +5180,7 @@ void FBytecodeGraph::FindConstants() {
 
 		/* Only the compiler's own scratch is ever one of these. A variable the graph declared is
 		 * the graph's however seldom it is written. */
-		if (!Name.StartsWith(TEXT("Temp_"))) continue;
+		if (!Name.StartsWith(TEXT("Temp_"), ESearchCase::CaseSensitive)) continue;
 
 		const FString What = MacroReading::TokenOf(Statement.GetObject(TEXT("Expression")));
 
@@ -4964,7 +5228,7 @@ void FBytecodeGraph::FindConstants() {
 
 		if (Token != TEXT("EX_JumpIfNot") && Token != TEXT("EX_PopExecutionFlowIfNot")) continue;
 
-		if (const FString Asked = MacroReading::ReadFrom(Statement.GetObject(TEXT("BooleanExpression"))); Asked.StartsWith(TEXT("Temp_"))) {
+		if (const FString Asked = MacroReading::ReadFrom(Statement.GetObject(TEXT("BooleanExpression"))); Asked.StartsWith(TEXT("Temp_"), ESearchCase::CaseSensitive)) {
 			TestedScratch.Add(Asked);
 		}
 	}
@@ -4983,7 +5247,7 @@ void FBytecodeGraph::FindConstants() {
 		for (const TPair<FString, TSharedPtr<FJsonValue>>& Field : Statement.JsonObject->Values) NamesRead(Field.Value, Reads);
 
 		for (const FString& Read : Reads) {
-			if (Read.StartsWith(TEXT("Temp_")) && !Writes.Contains(Read)) HeldScratch.Add(Read);
+			if (Read.StartsWith(TEXT("Temp_"), ESearchCase::CaseSensitive) && !Writes.Contains(Read)) HeldScratch.Add(Read);
 		}
 
 		/* Or assigned once and then changed in place.
@@ -4997,7 +5261,7 @@ void FBytecodeGraph::FindConstants() {
 		for (const TPair<FString, TSharedPtr<FJsonValue>>& Field : Statement.JsonObject->Values) ArraysChanged(Field.Value, Changed);
 
 		for (const FString& One : Changed) {
-			if (One.StartsWith(TEXT("Temp_"))) HeldScratch.Add(One);
+			if (One.StartsWith(TEXT("Temp_"), ESearchCase::CaseSensitive)) HeldScratch.Add(One);
 		}
 	}
 
@@ -5016,7 +5280,7 @@ void FBytecodeGraph::FindConstants() {
 
 		const FString Name = MacroReading::WrittenTo(Statement);
 
-		if (!Name.StartsWith(TEXT("Temp_"))) continue;
+		if (!Name.StartsWith(TEXT("Temp_"), ESearchCase::CaseSensitive)) continue;
 
 		if (MacroReading::TokenOf(Statements[Index + 1]) != TEXT("EX_Jump")) continue;
 

@@ -241,6 +241,11 @@ private:
 	/* The Local node standing for a kept scratch, made the first time it is wanted */
 	UEdGraphPin* Temporary(const FString& Name, const FUObjectJsonValueExport& Property);
 
+	/* What stood where a call reads a local nothing writes, for a pin that cannot be left empty (taken by
+	 * reference). The compiler leaves a Make node whose members are all defaults, and a function local nobody
+	 * set, as just the local; this puts the node, or the local, back. */
+	UEdGraphPin* StandInFor(const FUObjectJsonValueExport& Argument);
+
 	/* Declares a local the function keeps, where it does not have one already */
 	bool EnsureLocal(const FString& Name, const FUObjectJsonValueExport& Property);
 

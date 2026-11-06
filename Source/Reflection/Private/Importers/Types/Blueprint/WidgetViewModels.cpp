@@ -271,6 +271,20 @@ namespace {
 		return UE::MVVM::FMVVMConstFieldVariant();
 	}
 
+	/* Whether the view compiler sees a widget of this name: in the blueprint's own tree, or in the nearest parent's
+	 * where the blueprint has none (FMVVMViewBlueprintCompiler::CreateWidgetMap) */
+	bool SeesWidget(const UWidgetBlueprint* Blueprint, const FName Name) {
+		for (const UWidgetBlueprint* Scan = Blueprint; Scan != nullptr;) {
+			const TArray<const UWidget*> Widgets = Scan->GetAllSourceWidgets();
+
+			if (Widgets.Num() > 0) return Widgets.ContainsByPredicate([Name](const UWidget* Widget) { return Widget != nullptr && Widget->GetFName() == Name; });
+
+			Scan = Scan->ParentClass != nullptr ? Cast<UWidgetBlueprint>(Scan->ParentClass->ClassGeneratedBy) : nullptr;
+		}
+
+		return false;
+	}
+
 	/* One step of a path read out of bytecode, which says what it is on where the script does */
 	struct FStep {
 		bool bProperty = true;
@@ -627,11 +641,16 @@ int32 FWidgetViewModels::ConstructBindings(UWidgetBlueprint* Blueprint) {
 				const FMVVMBlueprintViewModelContext* Context = BlueprintView->FindViewModel(*ViewModel);
 				On = Context != nullptr ? Context->GetViewModelClass() : (Object != nullptr ? Object->PropertyClass.Get() : nullptr);
 				First = 1;
-			} else if (Object != nullptr && Object->PropertyClass->IsChildOf(UWidget::StaticClass())) {
+			} else if (Object != nullptr && Object->PropertyClass->IsChildOf(UWidget::StaticClass()) && SeesWidget(Blueprint, Steps[0].Name)) {
 				Out.SetWidgetName(Steps[0].Name);
 				On = Object->PropertyClass;
 				First = 1;
 			}
+			/* A widget only a parent blueprint's tree holds, while this one has a tree of its own (the content of the
+			 * parent's named slots). 5.8's view compiler looks a widget up in the blueprint's own tree, and in the
+			 * parent's only when there is none (CreateWidgetMap), so it would not find it; the game's compiler did.
+			 * Read from self it is the same field path (the inherited widget property, then the field), which is what
+			 * the view class was cooked with. */
 		}
 
 		if (First == 0) Out.SetSelfContext();

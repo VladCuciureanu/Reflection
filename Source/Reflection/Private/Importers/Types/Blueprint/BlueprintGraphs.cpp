@@ -10,6 +10,7 @@
 #include "AnimGraphNode_LinkedInputPose.h"
 #endif
 #include "Importers/Types/Blueprint/BlueprintVariables.h"
+#include "Engine/Log.h"
 #include "Importers/Types/Blueprint/MacroPattern.h"
 
 #include "EdGraphSchema_K2.h"
@@ -399,11 +400,16 @@ UEdGraph* FBlueprintGraphs::Make(UBlueprint* Blueprint, const FString& Name, con
 	for (const TSharedPtr<FJsonObject>& Parameter : Takes) {
 		FEdGraphPinType Type;
 
-		if (!FBlueprintVariables::GetPinType(Parameter, Type)) continue;
+		if (!FBlueprintVariables::GetPinType(Parameter, Type)) {
+			UE_LOG(LogReflection, Warning, TEXT("\"%s\" loses its parameter \"%s\": no pin type for it"), *Graph->GetName(), *Parameter->GetStringField(TEXT("Name")));
+			continue;
+		}
 
 		PassedAs(Parameter, Type);
 
-		Entry->CreateUserDefinedPin(FName(*Parameter->GetStringField(TEXT("Name"))), Type, EGPD_Output);
+		if (Entry->CreateUserDefinedPin(FName(*Parameter->GetStringField(TEXT("Name"))), Type, EGPD_Output) == nullptr) {
+			UE_LOG(LogReflection, Warning, TEXT("\"%s\" loses its parameter \"%s\": the entry node refused the pin"), *Graph->GetName(), *Parameter->GetStringField(TEXT("Name")));
+		}
 	}
 
 	if (GivesBack.Num() == 0) return Graph;

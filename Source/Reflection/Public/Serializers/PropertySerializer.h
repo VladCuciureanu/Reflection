@@ -128,3 +128,20 @@ inline bool PassthroughPropertyHandler(FProperty* Property, const FString& Prope
 
 	return false;
 }
+/* Class references read before the class they name existed.
+ *
+ * A blueprint that names another blueprint's class in a property (a list's entry widget, an action bar's button) can
+ * be read while that other blueprint is still being imported further up, and the reference comes back empty. Each
+ * such reference is kept here, and an import that finishes points them again (IBlueprintImporter::Import): the
+ * outermost import finishes last, by which time every class it brought in exists. */
+struct REFLECTION_API FPendingClassReferences {
+	/* Keeps a class property of Owner that came out empty for the class its reference names */
+	static void Add(UObject* Owner, const FClassProperty* Property, const FString& ObjectName, const FString& ObjectPath);
+
+	/* Points every kept reference whose class is here now; answers the objects it changed */
+	static TArray<UObject*> Retry();
+
+	/* The objects of references pointed since this was last asked, each answered once: saved again when the outermost
+	 * import ends, as an import still running when one was pointed has already written its package */
+	static TArray<UObject*> TakePointed();
+};

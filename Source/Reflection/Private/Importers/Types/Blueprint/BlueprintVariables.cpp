@@ -397,6 +397,54 @@ bool FBlueprintVariables::GetPinType(const TSharedPtr<FJsonObject>& Property, FE
 		return true;
 	}
 
+	/* A delegate, typed by the function whose signature it carries: Class'Name__DelegateSignature' in a module for one
+	 * declared on its own, Class'Owner:Name__DelegateSignature' for one declared in a class. A function's parameter or
+	 * local can be one; without it the parameter is left off the function, and every call made with it loses a pin. A
+	 * multicast one is a dispatcher, which a blueprint declares another way, so it stays unsupported here. */
+	if (Type == TEXT("DelegateProperty")) {
+		const TSharedPtr<FJsonObject>* Reference;
+		FString ObjectName, ObjectPath;
+
+		if (!Property->TryGetObjectField(TEXT("SignatureFunction"), Reference)) return false;
+		if (!(*Reference)->TryGetStringField(TEXT("ObjectName"), ObjectName) || !(*Reference)->TryGetStringField(TEXT("ObjectPath"), ObjectPath)) return false;
+
+		FString Inner = ObjectName;
+
+		if (int32 Quote; Inner.FindChar(TEXT('\''), Quote)) {
+			Inner = Inner.Mid(Quote + 1);
+			Inner.RemoveFromEnd(TEXT("'"));
+		}
+
+		/* Where it lives: the module (or package) the path names, then the class it was declared in, if any */
+		if (int32 Dot; !ObjectPath.StartsWith(TEXT("/Script/")) && ObjectPath.FindLastChar(TEXT('.'), Dot)) LeftInline(ObjectPath, Dot);
+		const FString Asked = ObjectPath;
+		if (!ObjectPath.StartsWith(TEXT("/Script/"))) ObjectPath = ToEditorPackagePath(ObjectPath);
+
+		FString Owner, Name = Inner;
+		Inner.Split(TEXT(":"), &Owner, &Name);
+
+		const FString Full = Owner.IsEmpty() ? ObjectPath + TEXT(".") + Name : ObjectPath + TEXT(".") + Owner + TEXT(":") + Name;
+		UFunction* Signature = FindObject<UFunction>(nullptr, *Full);
+
+		if (Signature == nullptr) Signature = LoadObject<UFunction>(nullptr, *Full, nullptr, LOAD_NoWarn | LOAD_Quiet);
+
+		/* A dispatcher's signature declared by a blueprint the project hasn't got yet: asked for, as a struct's is
+		 * (ResolveField), or the parameter is left off and whatever binds it loses its delegate */
+		if (Signature == nullptr && !Asked.StartsWith(TEXT("/Script/")) && TToolImportFromPath::Import(Asked)) {
+			Signature = LoadObject<UFunction>(nullptr, *Full, nullptr, LOAD_NoWarn | LOAD_Quiet);
+		}
+
+		if (Signature == nullptr) {
+			UE_LOG(LogReflection, Warning, TEXT("A delegate's signature \"%s\" isn't there"), *Full);
+			return false;
+		}
+
+		OutPinType.PinCategory = UEdGraphSchema_K2::PC_Delegate;
+		FMemberReference::FillSimpleMemberReference<UFunction>(Signature, OutPinType.PinSubCategoryMemberReference);
+
+		return true;
+	}
+
 	if (Type == TEXT("InterfaceProperty")) {
 		UClass* Class = ResolveField<UClass>(Property, TEXT("InterfaceClass"));
 		if (!Class) return false;
