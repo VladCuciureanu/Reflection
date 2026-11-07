@@ -1,8 +1,10 @@
-/* Copyright Reflection Contributors 2024-2026 */
+﻿/* Copyright Reflection Contributors 2024-2026 */
 
 #include "Importers/Types/ItemDefinitionData.h"
 
 #include "Serializers/ObjectSerializer.h"
+#include "Modules/Cloud/Cloud.h"
+#include "StructUtils/InstancedStruct.h"
 
 namespace {
 	/* What an entry carries, against the property it stands for.
@@ -56,6 +58,33 @@ int32 FItemDefinitionData::Apply(UObject* Asset, const TSharedPtr<FJsonObject>& 
 
 	if (Wrote > 0) {
 		Serializer->DeserializeObjectProperties(Said, Asset);
+	}
+
+	/* The list itself, which is where the game reads these (an item definition's FindComponentData). The plain
+	 * export leaves each entry's struct unnamed; the typed one names it, so the entries are made from that. */
+	const FArrayProperty* ListProperty = FindFProperty<FArrayProperty>(Asset->GetClass(), TEXT("DataList"));
+	const FStructProperty* EntryProperty = ListProperty ? CastField<FStructProperty>(ListProperty->Inner) : nullptr;
+
+	if (EntryProperty != nullptr && EntryProperty->Struct == FInstancedStruct::StaticStruct() && List->Num() > 0) {
+		const TSharedPtr<FJsonObject> Typed = Cloud::GetBlocking(TEXT("/api/export/typed"), { { TEXT("path"), Asset->GetPackage()->GetName() } });
+		const TArray<TSharedPtr<FJsonValue>>* Exports = nullptr;
+
+		if (Typed.IsValid() && Typed->TryGetArrayField(TEXT("exports"), Exports)) {
+			for (const TSharedPtr<FJsonValue>& Export : *Exports) {
+				const TSharedPtr<FJsonObject> Object = Export.IsValid() ? Export->AsObject() : nullptr;
+				const TSharedPtr<FJsonObject>* Properties = nullptr;
+				const TArray<TSharedPtr<FJsonValue>>* TypedList = nullptr;
+
+				if (!Object.IsValid() || Object->GetStringField(TEXT("Name")) != Asset->GetName()) continue;
+				if (!Object->TryGetObjectField(TEXT("Properties"), Properties) || !(*Properties)->TryGetArrayField(TEXT("DataList"), TypedList)) break;
+
+				const TSharedPtr<FJsonObject> Listed = MakeShared<FJsonObject>();
+				Listed->SetArrayField(TEXT("DataList"), *TypedList);
+				Serializer->DeserializeObjectProperties(Listed, Asset);
+				Wrote += TypedList->Num();
+				break;
+			}
+		}
 	}
 
 	return Wrote;

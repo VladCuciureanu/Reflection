@@ -2,6 +2,7 @@
 
 #include "Serializers/PropertySerializer.h"
 #include "StructUtils/PropertyBag.h"
+#include "StructUtils/InstancedStruct.h"
 #include "Engine/Blueprint.h"
 #include "UObject/PropertyOptional.h"
 
@@ -902,6 +903,24 @@ void UPropertySerializer::DeserializePropertyValue(FProperty* Property, const TS
 		 * asset guids come through as. */
 		if (StructProperty->Struct == TBaseStructure<FGuid>::Get() && NewJsonValue->Type == EJson::String) {
 			FGuid::Parse(NewJsonValue->AsString(), *static_cast<FGuid*>(OutValue));
+
+			return;
+		}
+
+		/* An instanced struct names its type where the export is typed ("$struct", Mirror's /api/export/typed): made
+		 * as that struct and read into like any other. Without the name there is nothing to make it as. */
+		if (StructProperty->Struct == FInstancedStruct::StaticStruct() && NewJsonValue->Type == EJson::Object) {
+			FInstancedStruct* Instanced = static_cast<FInstancedStruct*>(OutValue);
+			FString StructName;
+
+			if (NewJsonValue->AsObject()->TryGetStringField(TEXT("$struct"), StructName)) {
+				if (UScriptStruct* Made = FindFirstObject<UScriptStruct>(*StructName, EFindFirstObjectOptions::NativeFirst)) {
+					Instanced->InitializeAs(Made);
+					DeserializeStruct(Made, NewJsonValue->AsObject().ToSharedRef(), Instanced->GetMutableMemory(), OptionalOuter);
+				} else {
+					UE_LOG(LogReflectionPropertySerializer, Warning, TEXT("An instanced %s was left empty: this project has no such struct"), *StructName);
+				}
+			}
 
 			return;
 		}

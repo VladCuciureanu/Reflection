@@ -223,7 +223,7 @@ bool IBlueprintImporter::Import() {
 	 * (WidgetBlueprintGeneratedClassExtension_<Name>); the blueprint extensions themselves are editor data and
 	 * stripped. Where this project has the blueprint extension that makes one (WidgetBlueprintExtension_<Name>), it
 	 * is added and given the cooked extension's properties, so the compile makes the class extension again. */
-	if (UWidgetBlueprint* WidgetBlueprint = Cast<UWidgetBlueprint>(Blueprint)) {
+	if (UWidgetBlueprint* WidgetBlueprint = Cast<UWidgetBlueprint>(Blueprint); WidgetBlueprint != nullptr) {
 		static const FString Prefix = TEXT("WidgetBlueprintGeneratedClassExtension_");
 
 		for (FUObjectExport* Export : GetContainer()->Exports) {
