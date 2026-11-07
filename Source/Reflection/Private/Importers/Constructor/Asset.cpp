@@ -115,11 +115,13 @@ UPackage* FAssetUtilities::CreateAssetPackage(const FString& Name, const FString
 				FString RemainingPath;
 				/* PluginName = TestName */
 				/* RemainingPath = SetupAssets/Materials */
-				ModifiablePath.Split("/Content/", &PluginName, &RemainingPath, ESearchCase::IgnoreCase, ESearchDir::FromStart);
+				/* An asset at the plugin's content root leaves ".../Content" with no slash after it */
+				(ModifiablePath + TEXT("/")).Split("/Content/", &PluginName, &RemainingPath, ESearchCase::IgnoreCase, ESearchDir::FromStart);
+				RemainingPath.RemoveFromEnd(TEXT("/"));
 				PluginName.Split("/", nullptr, &PluginName, ESearchCase::IgnoreCase, ESearchDir::FromEnd);
 
 				/* /PluginName/Materials */
-				ModifiablePath = PluginName + "/" + RemainingPath;
+				ModifiablePath = RemainingPath.IsEmpty() ? PluginName : PluginName + "/" + RemainingPath;
 			}
 			/* Content/SecondaryFolder -> Game/SecondaryFolder */
 			else {
