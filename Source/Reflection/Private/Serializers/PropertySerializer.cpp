@@ -1,6 +1,7 @@
 ﻿/* Copyright Reflection Contributors 2024-2026 */
 
 #include "Serializers/PropertySerializer.h"
+#include "StructUtils/PropertyBag.h"
 #include "Engine/Blueprint.h"
 #include "UObject/PropertyOptional.h"
 
@@ -905,6 +906,15 @@ void UPropertySerializer::DeserializePropertyValue(FProperty* Property, const TS
 			return;
 		}
 
+		/* A property bag carries its own layout: the descriptors make its properties, then each value is read into
+		 * them like any other property (a bag inside a bag recurses through here). The game's style sheets keep their
+		 * rules' values in these. */
+		if (StructProperty->Struct == FInstancedPropertyBag::StaticStruct() && NewJsonValue->Type == EJson::Object) {
+			DeserializePropertyBag(NewJsonValue->AsObject().ToSharedRef(), *static_cast<FInstancedPropertyBag*>(OutValue), OptionalOuter);
+
+			return;
+		}
+
 		if (StructProperty->Struct == FGameplayTag::StaticStruct()) {
 			FGameplayTag* GameplayTagStr = static_cast<FGameplayTag*>(OutValue);
 			FGameplayTag NewTag = RequestOrMakeGameplayTag(NewJsonValue->AsObject()->GetStringField(TEXT("TagName")));
@@ -1453,4 +1463,70 @@ TArray<UObject*> FPendingClassReferences::Retry() {
 	}
 
 	return Changed;
+}
+
+/* The type object a bag descriptor names, written as {"ObjectName": "Class'ETextTransformPolicy'", "ObjectPath": "/Script/SlateCore"} */
+static UObject* FindBagValueTypeObject(const TSharedPtr<FJsonObject>& Ref) {
+	if (!Ref.IsValid()) return nullptr;
+
+	FString ObjectName, ObjectPath;
+	if (!Ref->TryGetStringField(TEXT("ObjectName"), ObjectName) || !Ref->TryGetStringField(TEXT("ObjectPath"), ObjectPath)) return nullptr;
+
+	FString Name = ObjectName;
+	int32 Quote = INDEX_NONE;
+	if (Name.FindChar(TEXT('\''), Quote)) Name = Name.Mid(Quote + 1).LeftChop(1);
+
+	FString Package = ObjectPath;
+	int32 Dot = INDEX_NONE;
+	if (Package.FindLastChar(TEXT('.'), Dot) && !Package.StartsWith(TEXT("/Script/"))) Package = Package.Left(Dot);
+
+	if (UObject* Found = FindObject<UObject>(nullptr, *(Package + TEXT(".") + Name))) return Found;
+	return StaticLoadObject(UObject::StaticClass(), nullptr, *(Package + TEXT(".") + Name), nullptr, LOAD_NoWarn | LOAD_Quiet);
+}
+
+void UPropertySerializer::DeserializePropertyBag(const TSharedRef<FJsonObject>& Json, FInstancedPropertyBag& Bag, UObject* OptionalOuter) {
+	const TArray<TSharedPtr<FJsonValue>>* Descs = nullptr;
+	if (!Json->TryGetArrayField(TEXT("PropertyDescs"), Descs)) return;
+
+	TArray<FPropertyBagPropertyDesc> Made;
+	for (const TSharedPtr<FJsonValue>& Value : *Descs) {
+		const TSharedPtr<FJsonObject> Desc = Value.IsValid() ? Value->AsObject() : nullptr;
+		if (!Desc.IsValid()) continue;
+
+		const UEnum* TypeEnum = StaticEnum<EPropertyBagPropertyType>();
+		FString TypeText = Desc->GetStringField(TEXT("ValueType"));
+		TypeText.Split(TEXT("::"), nullptr, &TypeText);
+		const int64 Type = TypeEnum->GetValueByNameString(TypeText);
+		if (Type == INDEX_NONE) continue;
+
+		const TSharedPtr<FJsonObject>* TypeObject = nullptr;
+		UObject* ValueTypeObject = Desc->TryGetObjectField(TEXT("ValueTypeObject"), TypeObject) ? FindBagValueTypeObject(*TypeObject) : nullptr;
+
+		FString ContainerText = Desc->GetStringField(TEXT("ContainerType"));
+		ContainerText.Split(TEXT("::"), nullptr, &ContainerText);
+		const int64 Container = StaticEnum<EPropertyBagContainerType>()->GetValueByNameString(ContainerText);
+
+		FPropertyBagPropertyDesc& Entry = Made.Add_GetRef(FPropertyBagPropertyDesc(FName(Desc->GetStringField(TEXT("Name"))), static_cast<EPropertyBagPropertyType>(Type), ValueTypeObject));
+		if (Container != INDEX_NONE && static_cast<EPropertyBagContainerType>(Container) != EPropertyBagContainerType::None) {
+			Entry.ContainerTypes = FPropertyBagContainerTypes(static_cast<EPropertyBagContainerType>(Container));
+		}
+		FGuid::Parse(Desc->GetStringField(TEXT("ID")), Entry.ID);
+	}
+	Bag.AddProperties(Made);
+
+	const TArray<TSharedPtr<FJsonValue>>* Values = nullptr;
+	if (!Json->TryGetArrayField(TEXT("Properties"), Values)) return;
+
+	uint8* Memory = Bag.GetMutableValue().GetMemory();
+	for (const TSharedPtr<FJsonValue>& Value : *Values) {
+		const TSharedPtr<FJsonObject> Entry = Value.IsValid() ? Value->AsObject() : nullptr;
+		if (!Entry.IsValid() || !Memory) continue;
+
+		const FPropertyBagPropertyDesc* Desc = Bag.FindPropertyDescByName(FName(Entry->GetStringField(TEXT("Name"))));
+		const TSharedPtr<FJsonValue> Tag = Entry->TryGetField(TEXT("Tag"));
+		if (Desc == nullptr || Desc->CachedProperty == nullptr || !Tag.IsValid() || Tag->IsNull()) continue;
+
+		FProperty* Property = const_cast<FProperty*>(Desc->CachedProperty);
+		DeserializePropertyValue(Property, Tag.ToSharedRef(), Property->ContainerPtrToValuePtr<void>(Memory), OptionalOuter);
+	}
 }

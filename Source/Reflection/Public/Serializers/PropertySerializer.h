@@ -29,6 +29,7 @@ public:
 
 	void DeserializePropertyValue(FProperty* Property, const TSharedRef<FJsonValue>& Value, void* OutValue, UObject* OptionalOuter = nullptr);
 	void DeserializeStruct(UScriptStruct* Struct, const TSharedRef<FJsonObject>& Value, void* OutValue, UObject* OptionalOuter = nullptr) const;
+	void DeserializePropertyBag(const TSharedRef<FJsonObject>& Json, struct FInstancedPropertyBag& Bag, UObject* OptionalOuter = nullptr);
 
 	/* Moves an expression input that points at a rebuilt MaterialExpressionConvert onto the root
 	 * standing in for the output it named. No-op unless ConvertOutputRoots has entries. */

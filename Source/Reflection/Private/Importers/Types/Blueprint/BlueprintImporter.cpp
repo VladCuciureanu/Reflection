@@ -1,4 +1,4 @@
-/* Copyright Reflection Contributors 2024-2026 */
+﻿/* Copyright Reflection Contributors 2024-2026 */
 
 #include "Importers/Types/Blueprint/BlueprintImporter.h"
 #include "Importers/Types/Blueprint/WidgetTreeSource.h"
@@ -24,6 +24,7 @@
 #include "Animation/MovieSceneWidgetMaterialTrack.h"
 #include "Animation/WidgetAnimation.h"
 #include "Blueprint/WidgetTree.h"
+#include "WidgetBlueprintExtension.h"
 #include "Engine/SimpleConstructionScript.h"
 #include "Kismet2/BlueprintEditorUtils.h"
 #include "Kismet2/KismetEditorUtilities.h"
@@ -216,6 +217,32 @@ bool IBlueprintImporter::Import() {
 
 	if (UWidgetBlueprint* WidgetBlueprint = Cast<UWidgetBlueprint>(Blueprint); WidgetBlueprint != nullptr && ViewModels->IsValid()) {
 		Declared += ViewModels->ConstructViewModels(WidgetBlueprint, GetObjectSerializer());
+	}
+
+	/* A cooked widget class carries the extensions its blueprint's extensions made when it compiled
+	 * (WidgetBlueprintGeneratedClassExtension_<Name>); the blueprint extensions themselves are editor data and
+	 * stripped. Where this project has the blueprint extension that makes one (WidgetBlueprintExtension_<Name>), it
+	 * is added and given the cooked extension's properties, so the compile makes the class extension again. */
+	if (UWidgetBlueprint* WidgetBlueprint = Cast<UWidgetBlueprint>(Blueprint)) {
+		static const FString Prefix = TEXT("WidgetBlueprintGeneratedClassExtension_");
+
+		for (FUObjectExport* Export : GetContainer()->Exports) {
+			if (Export == nullptr || !Export->IsJsonValid()) continue;
+
+			const FString Type = Export->GetType().ToString();
+			if (!Type.StartsWith(Prefix)) continue;
+
+			UClass* Maker = FindFirstObject<UClass>(*(TEXT("WidgetBlueprintExtension_") + Type.Mid(Prefix.Len())), EFindFirstObjectOptions::NativeFirst);
+			if (Maker == nullptr || !Maker->IsChildOf(UWidgetBlueprintExtension::StaticClass())) continue;
+
+			UWidgetBlueprintExtension* Made = UWidgetBlueprintExtension::RequestExtension(WidgetBlueprint, Maker);
+			const TSharedPtr<FJsonObject>* Properties = nullptr;
+
+			if (Made != nullptr && Export->JsonObject->TryGetObjectField(TEXT("Properties"), Properties)) {
+				GetObjectSerializer()->DeserializeObjectProperties(*Properties, Made);
+				UE_LOG(LogReflection, Display, TEXT("\"%s\" gets its %s back (from the cooked %s)"), *WidgetBlueprint->GetName(), *Maker->GetName(), *Type);
+			}
+		}
 	}
 
 	if (Declared > 0) {

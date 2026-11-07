@@ -1,4 +1,4 @@
-/* Copyright Reflection Contributors 2024-2026 */
+﻿/* Copyright Reflection Contributors 2024-2026 */
 
 #pragma once
 
@@ -9,6 +9,9 @@ public:
 	virtual void Repair(UObject* Asset) const override;
 };
 
-REGISTER_IMPORTER(IDataAssetImporter, {
-	TEXT("DataAsset")
-}, "Data Assets");
+/* Style sheets (the game's StyleSheets plugin) are plain objects holding their rules as subobjects; read the same way */
+REGISTER_IMPORTER(IDataAssetImporter, (TArray<FString>{
+	TEXT("DataAsset"),
+	TEXT("StyleSheet"),
+	TEXT("StyleSheetInstance")
+}), "Data Assets");
