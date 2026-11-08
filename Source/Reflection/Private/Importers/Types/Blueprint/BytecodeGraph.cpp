@@ -6296,6 +6296,14 @@ int32 FBytecodeGraph::Build() {
 		/* An address the graph is entered at begins a run of its own, from the node it is entered
 		 * through rather than from wherever the statement before it left off */
 		if (const TArray<TPair<TWeakObjectPtr<UK2Node>, FName>>* Entered = Starts.Find(Address)) {
+			/* The statement before may run straight into it as well: an event whose handler only jumps
+			 * here (a latent action's completion, say) is entered at the address it jumps to, which
+			 * code above can fall through to too. That way in is tied up as a jump to here, or it is lost
+			 * and everything after the address runs only from the event. */
+			if (Flow != nullptr) {
+				Jumps.Add(MakeTuple(Flow, Address));
+			}
+
 			Flow = nullptr;
 
 			for (const TPair<TWeakObjectPtr<UK2Node>, FName>& One : *Entered) {
