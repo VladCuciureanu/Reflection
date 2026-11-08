@@ -12,6 +12,8 @@
 #include "Importers/Constructor/Importer.h"
 #include "Serializers/ObjectSerializer.h"
 #include "UObject/TextProperty.h"
+#include "UObject/Utf8StrProperty.h"
+#include "UObject/AnsiStrProperty.h"
 #include "Misc/Base64.h"
 
 /* Struct Serializers */
@@ -1022,8 +1024,10 @@ void UPropertySerializer::DeserializePropertyValue(FProperty* Property, const TS
 			if (PathString != "") {
 				const FSoftObjectPath Reference(PathString);
 
-				FSoftObjectPtr* ObjectPtr = static_cast<FSoftObjectPtr*>(OutValue);
-				*ObjectPtr = Reference;
+				/* The value is an FSoftObjectPath, not an FSoftObjectPtr: written as the latter it lands 8 bytes
+				 * off and tramples the path's SubPathString (a UTF-8 string since 5.6), which the member-wise
+				 * read below then assigns into */
+				*static_cast<FSoftObjectPath*>(OutValue) = Reference;
 
 				if (!AlreadyHere(Reference)) {
 					/* Try importing it using Cloud */
@@ -1179,6 +1183,13 @@ void UPropertySerializer::DeserializePropertyValue(FProperty* Property, const TS
 	else if (Property->IsA<FStrProperty>()) {
 		const FString StringValue = NewJsonValue->AsString();
 		*static_cast<FString*>(OutValue) = StringValue;
+	}
+	/* UTF-8 and ANSI strings (UE 5.6+) come back from the exporter as plain JSON strings, like FString */
+	else if (Property->IsA<FUtf8StrProperty>()) {
+		*static_cast<FUtf8String*>(OutValue) = FUtf8String(NewJsonValue->AsString());
+	}
+	else if (Property->IsA<FAnsiStrProperty>()) {
+		*static_cast<FAnsiString*>(OutValue) = FAnsiString(NewJsonValue->AsString());
 	}
 	else if (const FEnumProperty* EnumProperty = CastField<const FEnumProperty>(Property)) {
 		/* Tagged properties name the value they hold, and anything an exporter reads by hand has

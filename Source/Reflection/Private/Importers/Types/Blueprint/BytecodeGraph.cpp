@@ -2295,7 +2295,17 @@ FBytecodeGraph::FValue FBytecodeGraph::ReadExpression(const FUObjectJsonValueExp
 	/* A map said all at once, which is a Make Map. Keys and values come two at a time, and an empty
 	 * one is told from the local it is stored into. */
 	if (Token == TEXT("EX_SetMap")) {
-		const TArray<FUObjectJsonValueExport> Values = Expression.Has(TEXT("Values")) ? Expression.GetArray(TEXT("Values")) : TArray<FUObjectJsonValueExport>();
+		TArray<FUObjectJsonValueExport> Values = Expression.Has(TEXT("Values")) ? Expression.GetArray(TEXT("Values")) : TArray<FUObjectJsonValueExport>();
+
+		/* Mirror writes each entry as one {Key, Value} object; a flat key, value, key, value list is read as it is */
+		if (Values.Num() > 0 && Values[0].Has(TEXT("Key")) && Values[0].Has(TEXT("Value"))) {
+			TArray<FUObjectJsonValueExport> Flat;
+			for (const FUObjectJsonValueExport& Entry : Values) {
+				Flat.Add(Entry.GetObject(TEXT("Key")));
+				Flat.Add(Entry.GetObject(TEXT("Value")));
+			}
+			Values = MoveTemp(Flat);
+		}
 
 		UK2Node_MakeMap* Node = AddNode<UK2Node_MakeMap>();
 
