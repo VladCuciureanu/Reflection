@@ -523,9 +523,13 @@ bool FTextureCreator::BuildSourceFromRawMip(UTexture* Texture, const TArray<uint
 void FTextureCreator::DeserializeTexture(UTexture* Texture, const TSharedPtr<FJsonObject>& Export) const {
 	if (Texture == nullptr) return;
 
+	/* Downscale was already applied when the game cooked the texture, so the mips that come down are
+	 * its result. Kept on the import, the build would shrink that cooked mip a second time (a 256 UI
+	 * icon cooked at Downscale 2 ships at 128 and would build at 64), so the import keeps the default. */
 	GetObjectSerializer()->DeserializeObjectProperties(RemovePropertiesShared(GetProperties(Export), {
 		"ImportedSize",
-		"LODBias"
+		"LODBias",
+		"Downscale"
 	}), Texture);
 }
 
