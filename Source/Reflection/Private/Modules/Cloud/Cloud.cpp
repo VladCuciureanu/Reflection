@@ -11,6 +11,10 @@
 #include "Engine/Log.h"
 #include "Engine/EngineUtilities.h"
 #include "Modules/Cloud/Remote.h"
+#include "StructUtils/InstancedStruct.h"
+#include "StructUtils/PropertyBag.h"
+#include "UObject/UnrealType.h"
+#include "UObject/PropertyOptional.h"
 
 /* Requests ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ */
 FReflectionHttpRequest Cloud::BuildRequest(const FString& RequestURL, const TMap<FString, FString>& Parameters, const TMap<FString, FString>& Headers) {
@@ -140,12 +144,236 @@ void Cloud::RunWhenSafe(TFunction<void()> Work) {
 	}));
 }
 
+/* Instanced struct types ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ */
+namespace {
+	bool HoldsTypedStructs(const UStruct* Struct, TMap<const UStruct*, bool>& Seen);
+
+	bool HoldsTypedStructs(const FProperty* Property, TMap<const UStruct*, bool>& Seen) {
+		if (Property == nullptr) return false;
+
+		if (const FStructProperty* StructProperty = CastField<FStructProperty>(Property)) {
+			if (StructProperty->Struct == FInstancedStruct::StaticStruct() || StructProperty->Struct == FInstancedPropertyBag::StaticStruct()) {
+				return true;
+			}
+
+			return HoldsTypedStructs(StructProperty->Struct, Seen);
+		}
+
+		if (const FArrayProperty* ArrayProperty = CastField<FArrayProperty>(Property)) return HoldsTypedStructs(ArrayProperty->Inner, Seen);
+		if (const FSetProperty* SetProperty = CastField<FSetProperty>(Property)) return HoldsTypedStructs(SetProperty->ElementProp, Seen);
+		if (const FMapProperty* MapProperty = CastField<FMapProperty>(Property)) {
+			return HoldsTypedStructs(MapProperty->KeyProp, Seen) || HoldsTypedStructs(MapProperty->ValueProp, Seen);
+		}
+		if (const FOptionalProperty* OptionalProperty = CastField<FOptionalProperty>(Property)) {
+			return HoldsTypedStructs(OptionalProperty->GetValueProperty(), Seen);
+		}
+
+		/* An instanced subobject is an export of its own, asked about by its own class */
+		return false;
+	}
+
+	bool HoldsTypedStructs(const UStruct* Struct, TMap<const UStruct*, bool>& Seen) {
+		if (Struct == nullptr) return false;
+		if (const bool* Known = Seen.Find(Struct)) return *Known;
+
+		/* A struct can't hold itself by value, so one met again while it is being walked is answered no until the
+		 * walk that started it finishes */
+		Seen.Add(Struct, false);
+
+		bool bHolds = false;
+
+		for (TFieldIterator<FProperty> It(Struct, EFieldIteratorFlags::IncludeSuper); It; ++It) {
+			if (HoldsTypedStructs(*It, Seen)) {
+				bHolds = true;
+
+				break;
+			}
+		}
+
+		Seen.Add(Struct, bHolds);
+
+		return bHolds;
+	}
+
+	/* What tells one export from another in both lists: the typed export is the raw one's cooked exports in the
+	 * same order, but the raw one can be a subset (export_name, export_type) and carries an editor copy's exports
+	 * after them. */
+	FString ExportKey(const TSharedPtr<FJsonObject>& Export) {
+		FString Type, Name, Outer;
+
+		Export->TryGetStringField(TEXT("Type"), Type);
+		Export->TryGetStringField(TEXT("Name"), Name);
+
+		if (const TSharedPtr<FJsonObject>* OuterObject = nullptr; Export->TryGetObjectField(TEXT("Outer"), OuterObject)) {
+			(*OuterObject)->TryGetStringField(TEXT("ObjectName"), Outer);
+		}
+
+		return Type + TEXT("|") + Name + TEXT("|") + Outer;
+	}
+
+	/* Copies the typed value's "$struct" names onto the raw value, which is the same value without them. Null when
+	 * the raw value was named in place; a value to put in its stead when it has to be replaced: an instanced struct
+	 * whose payload isn't an object is written by the typed export as { "$struct", "Value" }. */
+	TSharedPtr<FJsonValue> NameStructs(const TSharedPtr<FJsonValue>& Raw, const TSharedPtr<FJsonValue>& Typed, int32& Named) {
+		if (!Raw.IsValid() || !Typed.IsValid()) return nullptr;
+
+		if (Typed->Type == EJson::Object) {
+			const TSharedPtr<FJsonObject> TypedObject = Typed->AsObject();
+			FString StructName;
+			const bool bNamed = TypedObject->TryGetStringField(TEXT("$struct"), StructName);
+
+			if (Raw->Type != EJson::Object) {
+				if (!bNamed) return nullptr;
+
+				Named++;
+
+				return Typed;
+			}
+
+			const TSharedPtr<FJsonObject> RawObject = Raw->AsObject();
+
+			if (bNamed && !RawObject->HasField(TEXT("$struct"))) {
+				RawObject->SetStringField(TEXT("$struct"), StructName);
+				Named++;
+			}
+
+			for (auto& Field : RawObject->Values) {
+				if (const TSharedPtr<FJsonValue>* TypedField = TypedObject->Values.Find(Field.Key)) {
+					if (TSharedPtr<FJsonValue> Replaced = NameStructs(Field.Value, *TypedField, Named)) {
+						Field.Value = Replaced;
+					}
+				}
+			}
+
+			return nullptr;
+		}
+
+		if (Typed->Type == EJson::Array && Raw->Type == EJson::Array) {
+			const TArray<TSharedPtr<FJsonValue>>& RawArray = Raw->AsArray();
+			const TArray<TSharedPtr<FJsonValue>>& TypedArray = Typed->AsArray();
+
+			/* Not the same list: nothing to pair its elements by */
+			if (RawArray.Num() != TypedArray.Num()) return nullptr;
+
+			TArray<TSharedPtr<FJsonValue>> Rebuilt;
+			bool bReplaced = false;
+
+			for (int32 Index = 0; Index < RawArray.Num(); Index++) {
+				TSharedPtr<FJsonValue> Replaced = NameStructs(RawArray[Index], TypedArray[Index], Named);
+
+				if (Replaced.IsValid() && !bReplaced) {
+					Rebuilt = RawArray;
+					bReplaced = true;
+				}
+
+				if (Replaced.IsValid()) Rebuilt[Index] = Replaced;
+			}
+
+			if (!bReplaced) return nullptr;
+
+			return MakeShared<FJsonValueArray>(Rebuilt);
+		}
+
+		return nullptr;
+	}
+}
+
+bool Cloud::Export::CanHoldTypedStructs(const UStruct* Struct) {
+	TMap<const UStruct*, bool> Seen;
+
+	return HoldsTypedStructs(Struct, Seen);
+}
+
+bool Cloud::Export::NeedsStructTypes(const TSharedPtr<FJsonObject>& Response) {
+	const TArray<TSharedPtr<FJsonValue>>* Exports = nullptr;
+
+	if (!Response.IsValid() || !Response->TryGetArrayField(TEXT("exports"), Exports)) return false;
+
+	TMap<const UStruct*, bool> Seen;
+
+	for (const TSharedPtr<FJsonValue>& Value : *Exports) {
+		const TSharedPtr<FJsonObject> Export = Value.IsValid() && Value->Type == EJson::Object ? Value->AsObject() : nullptr;
+		FString Type;
+
+		if (!Export.IsValid() || !Export->TryGetStringField(TEXT("Type"), Type) || Type.IsEmpty()) continue;
+
+		/* A class this editor doesn't have yet (a Blueprint's, before its import) could hold one as well */
+		const UClass* Class = FindFirstObject<UClass>(*Type, EFindFirstObjectOptions::NativeFirst);
+
+		if (Class == nullptr || HoldsTypedStructs(Class, Seen)) return true;
+	}
+
+	return false;
+}
+
+int32 Cloud::Export::AddStructTypes(const FString& Path, const TSharedPtr<FJsonObject>& Response, const TSharedPtr<FJsonObject>& Typed) {
+	const TArray<TSharedPtr<FJsonValue>>* Exports = nullptr;
+	const TArray<TSharedPtr<FJsonValue>>* TypedExports = nullptr;
+
+	if (!Response.IsValid() || !Response->TryGetArrayField(TEXT("exports"), Exports)) return 0;
+
+	/* A Mirror without the typed export (upstream's) leaves the raw one as it was */
+	if (!Typed.IsValid() || !Typed->TryGetArrayField(TEXT("exports"), TypedExports)) {
+		UE_LOG(LogReflection, Verbose, TEXT("No typed export for \"%s\": its instanced structs stay unnamed"), *Path);
+
+		return 0;
+	}
+
+	TMap<FString, TSharedPtr<FJsonObject>> ByKey;
+
+	for (const TSharedPtr<FJsonValue>& Value : *TypedExports) {
+		if (Value.IsValid() && Value->Type == EJson::Object) {
+			ByKey.FindOrAdd(ExportKey(Value->AsObject()), Value->AsObject());
+		}
+	}
+
+	int32 Named = 0;
+
+	for (const TSharedPtr<FJsonValue>& Value : *Exports) {
+		if (!Value.IsValid() || Value->Type != EJson::Object) continue;
+
+		const TSharedPtr<FJsonObject> Export = Value->AsObject();
+		const TSharedPtr<FJsonObject>* TypedExport = ByKey.Find(ExportKey(Export));
+		const TSharedPtr<FJsonObject>* Properties = nullptr;
+		const TSharedPtr<FJsonObject>* TypedProperties = nullptr;
+
+		if (TypedExport == nullptr || !Export->TryGetObjectField(TEXT("Properties"), Properties)
+			|| !(*TypedExport)->TryGetObjectField(TEXT("Properties"), TypedProperties)) continue;
+
+		NameStructs(MakeShared<FJsonValueObject>(*Properties), MakeShared<FJsonValueObject>(*TypedProperties), Named);
+	}
+
+	if (Named > 0) {
+		UE_LOG(LogReflection, Log, TEXT("Named %d instanced struct(s) in \"%s\" from its typed export"), Named, *Path);
+	}
+
+	return Named;
+}
+
 /* Exports ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ */
 void Cloud::Export::GetAsync(const FString& Path, const bool Raw, TMap<FString, FString> Parameters, const TMap<FString, FString>& Headers, TFunction<void(TSharedPtr<FJsonObject>)> OnResponse) {
 	Parameters.Add(TEXT("path"), Path);
 	Parameters.Add(TEXT("raw"), Raw ? TEXT("true") : TEXT("false"));
 
-	Cloud::Get(ExportURL, Parameters, Headers, MoveTemp(OnResponse));
+	if (!Raw) {
+		Cloud::Get(ExportURL, Parameters, Headers, MoveTemp(OnResponse));
+
+		return;
+	}
+
+	/* The typed export asked for second, only when the raw one can hold an instanced struct (AddStructTypes) */
+	Cloud::Get(ExportURL, Parameters, Headers, [Path, OnResponse](const TSharedPtr<FJsonObject>& Response) {
+		if (!NeedsStructTypes(Response)) {
+			OnResponse(Response);
+
+			return;
+		}
+
+		Cloud::Get(TypedExportURL, { { TEXT("path"), Path } }, {}, [Path, Response, OnResponse](const TSharedPtr<FJsonObject>& Typed) {
+			AddStructTypes(Path, Response, Typed);
+			OnResponse(Response);
+		});
+	});
 }
 
 void Cloud::Export::GetRawAsync(const FString& Path, TFunction<void(TSharedPtr<FJsonObject>)> OnResponse) {
@@ -177,7 +405,14 @@ TSharedPtr<FJsonObject> Cloud::Export::GetBlocking(const FString& Path, const bo
 	Parameters.Add(TEXT("path"), Path);
 	Parameters.Add(TEXT("raw"), Raw ? TEXT("true") : TEXT("false"));
 
-	return Cloud::GetBlocking(ExportURL, Parameters, Headers);
+	const TSharedPtr<FJsonObject> Response = Cloud::GetBlocking(ExportURL, Parameters, Headers);
+
+	/* The typed export asked for only when the raw one can hold an instanced struct (AddStructTypes) */
+	if (Raw && NeedsStructTypes(Response)) {
+		AddStructTypes(Path, Response, Cloud::GetBlocking(TypedExportURL, { { TEXT("path"), Path } }));
+	}
+
+	return Response;
 }
 
 TSharedPtr<FJsonObject> Cloud::Export::GetRawBlocking(const FString& Path, const TMap<FString, FString>& Parameters, const TMap<FString, FString>& Headers) {

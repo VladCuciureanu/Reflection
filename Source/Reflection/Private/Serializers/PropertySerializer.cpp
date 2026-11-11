@@ -919,6 +919,12 @@ void UPropertySerializer::DeserializePropertyValue(FProperty* Property, const TS
 				if (UScriptStruct* Made = FindFirstObject<UScriptStruct>(*StructName, EFindFirstObjectOptions::NativeFirst)) {
 					Instanced->InitializeAs(Made);
 					DeserializeStruct(Made, NewJsonValue->AsObject().ToSharedRef(), Instanced->GetMutableMemory(), OptionalOuter);
+
+					/* A payload that isn't an object (a tag container's list) comes as { "$struct", "Value" }. No Fortnite
+					 * asset the locker reflects was found holding one, so it is only reported. */
+					if (NewJsonValue->AsObject()->HasField(TEXT("Value")) && Made->FindPropertyByName(TEXT("Value")) == nullptr) {
+						UE_LOG(LogReflectionPropertySerializer, Warning, TEXT("An instanced %s's value isn't an object and was left at its defaults"), *StructName);
+					}
 				} else {
 					UE_LOG(LogReflectionPropertySerializer, Warning, TEXT("An instanced %s was left empty: this project has no such struct"), *StructName);
 				}

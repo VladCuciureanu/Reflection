@@ -70,6 +70,7 @@ public:
 	static inline FString DnaPosesURL = TEXT("/api/export/dnaposes");
 	static inline FString DnaMorphsURL = TEXT("/api/export/dnamorphs");
 	static inline FString CurveMappingURL = TEXT("/api/export/curvemapping");
+	static inline FString TypedExportURL = TEXT("/api/export/typed");
 
 	class REFLECTION_API Export {
 	public:
@@ -82,6 +83,20 @@ public:
 
 		static TSharedPtr<FJsonObject> GetBlocking(const FString& Path, bool Raw, TMap<FString, FString> Parameters = {}, const TMap<FString, FString>& Headers = {});
 		static TSharedPtr<FJsonObject> GetRawBlocking(const FString& Path, const TMap<FString, FString>& Parameters = {}, const TMap<FString, FString>& Headers = {});
+
+		/* The raw export writes an instanced struct (FInstancedStruct, and one inside a property bag's values) as
+		 * its payload alone, so which struct it holds is lost and the property comes out empty. Mirror's typed
+		 * export (TypedExportURL) is the same cooked exports with "$struct" naming each one. Every raw export
+		 * fetched here, async or blocking, has those names copied onto it from the typed one when any of its
+		 * exports' classes can hold such a struct (or isn't known to this editor). Says how many it named. */
+		static int32 AddStructTypes(const FString& Path, const TSharedPtr<FJsonObject>& Response, const TSharedPtr<FJsonObject>& Typed);
+
+		/* Whether a value of Struct (a class or struct) can hold an FInstancedStruct or an FInstancedPropertyBag,
+		 * in its own properties or any container or struct among them. */
+		static bool CanHoldTypedStructs(const UStruct* Struct);
+
+		/* Whether a raw export's exports need the typed export at all (see AddStructTypes) */
+		static bool NeedsStructTypes(const TSharedPtr<FJsonObject>& Response);
 
 		/* Asks the export endpoint for bytes rather than json, with ContentType picking the
 		 * encoding. False when the Cloud couldn't produce the payload, which it says by answering

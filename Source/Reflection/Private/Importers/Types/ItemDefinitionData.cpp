@@ -60,31 +60,17 @@ int32 FItemDefinitionData::Apply(UObject* Asset, const TSharedPtr<FJsonObject>& 
 		Serializer->DeserializeObjectProperties(Said, Asset);
 	}
 
-	/* The list itself, which is where the game reads these (an item definition's FindComponentData). The plain
-	 * export leaves each entry's struct unnamed; the typed one names it, so the entries are made from that. */
+	/* The list itself, which is where the game reads these (an item definition's FindComponentData). Each entry is an
+	 * instanced struct, which the raw export names ("$struct") with the typed export's names
+	 * (Cloud::Export::AddStructTypes), so the entries are made from the list as it came. */
 	const FArrayProperty* ListProperty = FindFProperty<FArrayProperty>(Asset->GetClass(), TEXT("DataList"));
 	const FStructProperty* EntryProperty = ListProperty ? CastField<FStructProperty>(ListProperty->Inner) : nullptr;
 
 	if (EntryProperty != nullptr && EntryProperty->Struct == FInstancedStruct::StaticStruct() && List->Num() > 0) {
-		const TSharedPtr<FJsonObject> Typed = Cloud::GetBlocking(TEXT("/api/export/typed"), { { TEXT("path"), Asset->GetPackage()->GetName() } });
-		const TArray<TSharedPtr<FJsonValue>>* Exports = nullptr;
-
-		if (Typed.IsValid() && Typed->TryGetArrayField(TEXT("exports"), Exports)) {
-			for (const TSharedPtr<FJsonValue>& Export : *Exports) {
-				const TSharedPtr<FJsonObject> Object = Export.IsValid() ? Export->AsObject() : nullptr;
-				const TSharedPtr<FJsonObject>* Properties = nullptr;
-				const TArray<TSharedPtr<FJsonValue>>* TypedList = nullptr;
-
-				if (!Object.IsValid() || Object->GetStringField(TEXT("Name")) != Asset->GetName()) continue;
-				if (!Object->TryGetObjectField(TEXT("Properties"), Properties) || !(*Properties)->TryGetArrayField(TEXT("DataList"), TypedList)) break;
-
-				const TSharedPtr<FJsonObject> Listed = MakeShared<FJsonObject>();
-				Listed->SetArrayField(TEXT("DataList"), *TypedList);
-				Serializer->DeserializeObjectProperties(Listed, Asset);
-				Wrote += TypedList->Num();
-				break;
-			}
-		}
+		const TSharedPtr<FJsonObject> Listed = MakeShared<FJsonObject>();
+		Listed->SetArrayField(TEXT("DataList"), *List);
+		Serializer->DeserializeObjectProperties(Listed, Asset);
+		Wrote += List->Num();
 	}
 
 	return Wrote;
