@@ -167,6 +167,16 @@ inline bool ReadAnimationCurves(USerializerContainer* Container, UAnimSequenceBa
 
 		/* Keys of the track */
 		TArray<TSharedPtr<FJsonValue>> Keys = FloatCurveObject->AsObject()->GetObjectField(TEXT("FloatCurve"))->GetArrayField(TEXT("Keys"));
+#if UE5_2_BEYOND
+		/* The curve's keys go on together, as the cook has them (SetCurveKeys). One at a time, a key
+		 * whose time isn't another's but falls on the same frame of the sequencer's float channel
+		 * (the controller keys it at up to 240,000 frames a second) stopped the editor: SetCurveKey
+		 * adds a key it finds no rich key for at that time and checks the channel has none on its
+		 * frame (AnimSequencerController.cpp, SetCurveControlKey). Cooked idles carry such pairs
+		 * (ArcticSniper_Male_Idle). */
+		TArray<FRichCurveKey> CurveKeys;
+		CurveKeys.Reserve(Keys.Num());
+#endif
 
 		for (const auto& JsonKey : Keys) {
 			TSharedPtr<FJsonObject> Key = JsonKey->AsObject();
@@ -179,7 +189,7 @@ inline bool ReadAnimationCurves(USerializerContainer* Container, UAnimSequenceBa
 			 * Unreal Engine 4: Simply adding curves to RawCurveData
 			 * Unreal Engine 5: Using a AnimDataController to handle adding curves */
 #if UE5_2_BEYOND
-			Controller.SetCurveKey(CurveId, RichKey);
+			CurveKeys.Add(RichKey);
 #endif
 #if ENGINE_UE4
 			FRawCurveTracks& Tracks = AnimSequenceBase->RawCurveData;
@@ -205,6 +215,7 @@ inline bool ReadAnimationCurves(USerializerContainer* Container, UAnimSequenceBa
 #endif
 		}
 #if UE5_2_BEYOND
+		Controller.SetCurveKeys(CurveId, CurveKeys);
 		Controller.CloseBracket();
 #endif
 	}
