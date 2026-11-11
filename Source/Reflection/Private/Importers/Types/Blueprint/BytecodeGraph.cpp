@@ -42,6 +42,8 @@
 #include "K2Node_CallMaterialParameterCollectionFunction.h"
 #include "K2Node_CallDataTableFunction.h"
 #include "K2Node_GetDataTableRow.h"
+#include "K2Node_ConvertAsset.h"
+#include "Kismet/KismetSystemLibrary.h"
 #include "Kismet/DataTableFunctionLibrary.h"
 #include "K2Node_CallArrayFunction.h"
 #include "Kismet/KismetMathLibrary.h"
@@ -3261,6 +3263,38 @@ UK2Node* FBytecodeGraph::PlaceCall(const FUObjectJsonValueExport& Expression, UE
 	 * own, so the node types it from the table instead. */
 	if (Function->GetFName() == TEXT("GetDataTableRowFromName") && Function->GetOwnerClass() == UDataTableFunctionLibrary::StaticClass()) {
 		if (UK2Node* Reading = GetDataTableRow(Expression)) return Reading;
+	}
+
+	/* Making a soft reference is a node, not a call. The function is internal (BlueprintInternalUseOnly): it is what
+	 * Make Soft Reference (K2Node_ConvertAsset) expands to, and it hands back a soft reference to any object, which the
+	 * expansion retypes to the class wired in. Read back as the call, a soft reference to an object is what comes out,
+	 * and no pin that wants one of a class takes it: PlayerBanner's SetBannerIconId hands
+	 * Conv_ObjectToSoftObjectReference(GetBannerMID()) to SetFromLazyMaterialAndTexture's material, the link was
+	 * refused and the two pure nodes were left out, so the banner's icon was never set. The node types its output from
+	 * its input, as the editor's does, and compiles back to the same call. */
+	if (Function->GetOwnerClass() == UKismetSystemLibrary::StaticClass()
+		&& (Function->GetFName() == GET_FUNCTION_NAME_CHECKED(UKismetSystemLibrary, Conv_ObjectToSoftObjectReference)
+			|| Function->GetFName() == GET_FUNCTION_NAME_CHECKED(UKismetSystemLibrary, Conv_ClassToSoftClassReference))) {
+		const TArray<FUObjectJsonValueExport> Arguments = Expression.Has(TEXT("Parameters")) ? Expression.GetArray(TEXT("Parameters")) : TArray<FUObjectJsonValueExport>();
+
+		if (Arguments.Num() == 1) {
+			UK2Node_ConvertAsset* Converting = AddNode<UK2Node_ConvertAsset>();
+
+			Converting->AllocateDefaultPins();
+
+			/* By name: the node's GetInputPin isn't exported. "Input" is the name its AllocateDefaultPins gives. */
+			UEdGraphPin* Input = Converting->FindPin(TEXT("Input"), EGPD_Input);
+
+			Give(Read(Arguments[0]), Input);
+
+			/* Typed by what was wired in; the schema's connection already asked, this says it again for a link made
+			 * without it */
+			if (Input != nullptr && Input->LinkedTo.Num() > 0) Converting->NotifyPinConnectionListChanged(Input);
+
+			Placed++;
+
+			return Converting;
+		}
 	}
 
 	/* Adding a component is not a plain call in a graph: the editor has a node of its own for it,
