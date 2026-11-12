@@ -159,6 +159,15 @@ void IMaterialGraph::PropagateExpressions(FUObjectExportContainer* Container) {
 #endif
 		}
 
+		/* The node the material editor drew for the expression. A package that was cooked with its
+		 * editor graph still in it (M_S26_SL_PARENT keeps a MaterialGraph, its nodes and composites)
+		 * names it here, and reading the reference builds the node and the graph it sits in out of
+		 * their exports. That graph comes out with no schema (the export's Schema index lands on an
+		 * expression), and the expression's PostEditChange reconstructs its node through the schema:
+		 * an access violation in UnrealEd. The editor makes the graph and its nodes itself from the
+		 * expressions the first time the asset is opened, so the reference is left out. */
+		Properties->RemoveField(TEXT("GraphNode"));
+
 		GetObjectSerializer()->DeserializeObjectProperties(Properties, Expression);
 		ClampCustomPrimitiveDataIndex(Expression);
 		SetExpressionParent(Parent, Expression, Properties);
