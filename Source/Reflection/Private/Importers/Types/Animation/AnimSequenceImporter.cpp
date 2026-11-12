@@ -21,6 +21,9 @@
 /* Where the Cloud reads a sequence's keys back out of what the cook left of it */
 static const FString AnimationURL = TEXT("/api/export/animation");
 
+/* A sequence the cook kept no bone data for, only curves (below) */
+static bool IsCurveOnly(const TSharedPtr<FJsonObject>& Payload);
+
 /* The bone tracks of an animation sequence, a key a frame, rebuilt into the animation itself when
  * the sequence is a difference from another. Null when the Cloud has no sequence at Path, or when
  * it was compressed by something it has no reader for.
@@ -317,7 +320,7 @@ bool IAnimSequenceImporter::Import() {
 
 	const int32 WrittenTracks = BuildTracks(AnimSequence, Skeleton, Payload);
 
-	if (WrittenTracks == 0) {
+	if (WrittenTracks == 0 && !IsCurveOnly(Payload)) {
 		FImportIssues::Report(
 			EImportIssue::Failed,
 			TEXT("None of the animation's bones are on this skeleton"),
@@ -567,6 +570,18 @@ static void RebaseOntoProjectBase(const UAnimSequence* AnimSequence, const FRefe
 }
 #endif
 
+/* A sequence the cook kept no bone data for, only curves (a face's or a prop's material curves:
+ * M_LRG_Professor_Pup_Idle). The Cloud sends it with no tracks and its curves; it is built with its
+ * length and no bone tracks, and the curves are read from the export as for any other. */
+static bool IsCurveOnly(const TSharedPtr<FJsonObject>& Payload) {
+	const TArray<TSharedPtr<FJsonValue>>* TracksJson = nullptr;
+	const TArray<TSharedPtr<FJsonValue>>* CurvesJson = nullptr;
+
+	return Payload.IsValid()
+		&& Payload->TryGetArrayField(TEXT("tracks"), TracksJson) && TracksJson->Num() == 0
+		&& Payload->TryGetArrayField(TEXT("curves"), CurvesJson) && CurvesJson->Num() > 0;
+}
+
 int32 IAnimSequenceImporter::BuildTracks(UAnimSequence* AnimSequence, USkeleton* Skeleton, const TSharedPtr<FJsonObject>& Payload) const {
 	const TArray<TSharedPtr<FJsonValue>>* TracksJson = nullptr;
 
@@ -696,10 +711,12 @@ int32 IAnimSequenceImporter::BuildTracks(UAnimSequence* AnimSequence, USkeleton*
 		ScaleKeys.Add(MoveTemp(TrackScales));
 	}
 
-	if (BoneNames.Num() == 0) return 0;
+	const bool bCurveOnly = IsCurveOnly(Payload);
+
+	if (BoneNames.Num() == 0 && !bCurveOnly) return 0;
 
 #if ENGINE_UE5 && ENGINE_MINOR_VERSION >= 2
-	RebaseOntoProjectBase(AnimSequence, RefSkeleton, Payload, BoneNames, PositionKeys, RotationKeys, ScaleKeys);
+	if (!bCurveOnly) RebaseOntoProjectBase(AnimSequence, RefSkeleton, Payload, BoneNames, PositionKeys, RotationKeys, ScaleKeys);
 #endif
 
 	/* The rate the frames were laid out at, which is the sequence's own: the last frame lands on
