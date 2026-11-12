@@ -144,13 +144,63 @@ bool IStaticMeshImporter::Import() {
 		return Lod.JsonObject->TryGetArrayField(TEXT("indices"), Indices) ? Indices->Num() / 3 : 0;
 	};
 
+	/* How many of a LOD's triangles have three corners in three places.
+	 *
+	 * The stream keeps positions on the grid its PositionPrecision sets (2^-4 cm at 4), and a mesh
+	 * finer than that grid comes back out of it with every triangle flat on itself:
+	 * SM_FX_OboeThorn_Spline_Down_Bend, a ribbon 0.03 cm thick, reads back as 168 triangles none of
+	 * which has any area. The build drops each one, Nanite is asked to build from nothing ("Input has
+	 * 0 triangles"), the mesh is left with no render data, and the first thing that draws it (the
+	 * back bling's Niagara mesh renderer) stops the process on HasValidRenderData. */
+	const auto CountAreaTriangles = [](const FUObjectJsonValueExport& Lod) {
+		const TArray<TSharedPtr<FJsonValue>>* Indices = nullptr;
+		const TArray<TSharedPtr<FJsonValue>>* Positions = nullptr;
+		const TSharedPtr<FJsonObject>* Vertices = nullptr;
+
+		if (!Lod.JsonObject->TryGetArrayField(TEXT("indices"), Indices)) return 0;
+		if (!Lod.JsonObject->TryGetObjectField(TEXT("vertices"), Vertices) || !(*Vertices)->TryGetArrayField(TEXT("positions"), Positions)) return 0;
+
+		const auto Position = [Positions](const int32 Vertex) {
+			const int32 At = Vertex * 3;
+
+			return Positions->IsValidIndex(At + 2)
+				? FVector3f((*Positions)[At]->AsNumber(), (*Positions)[At + 1]->AsNumber(), (*Positions)[At + 2]->AsNumber())
+				: FVector3f::ZeroVector;
+		};
+
+		int32 Count = 0;
+
+		for (int32 At = 0; At + 2 < Indices->Num(); At += 3) {
+			const FVector3f A = Position(static_cast<int32>((*Indices)[At]->AsNumber()));
+			const FVector3f B = Position(static_cast<int32>((*Indices)[At + 1]->AsNumber()));
+			const FVector3f C = Position(static_cast<int32>((*Indices)[At + 2]->AsNumber()));
+
+			if (A != B && B != C && A != C) Count++;
+		}
+
+		return Count;
+	};
+
 	int32 NaniteSourceTriangles = 0;
+
+	/* The Cloud counts the stream as LOD 0 and every cooked LOD one on from where the render data has it */
+	bool bStreamListed = false;
 
 	for (const TSharedPtr<FJsonValue>& LodValue : *Lods) {
 		const FUObjectJsonValueExport Lod = LodValue;
 
 		if (Lod.JsonObject.IsValid() && Lod.GetBool(TEXT("nanite"), false)) {
-			NaniteSourceTriangles = CountTriangles(Lod);
+			bStreamListed = true;
+
+			/* A stream with no triangle left in it is not the mesh. The cooked fallback beside it is,
+			 * where the cook kept it whole (Down_Bend's: the 168 triangles and 110 vertices the
+			 * stream's NumInputTriangles / NumInputVertices say the mesh was): it is built from that,
+			 * as for a Cloud that doesn't read the stream. */
+			if (CountAreaTriangles(Lod) > 0) {
+				NaniteSourceTriangles = CountTriangles(Lod);
+			} else {
+				UE_LOG(LogReflection, Display, TEXT("\"%s\": the Nanite stream read back with no triangle that has any area (finer than its position precision); built from the cooked LODs"), *GetAssetName());
+			}
 
 			break;
 		}
@@ -162,6 +212,11 @@ bool IStaticMeshImporter::Import() {
 		const FUObjectJsonValueExport Lod = LodValue;
 		if (!Lod.JsonObject.IsValid()) continue;
 
+		/* The stream that was found unusable above */
+		if (bStreamListed && NaniteSourceTriangles == 0 && Lod.GetBool(TEXT("nanite"), false)) {
+			continue;
+		}
+
 		if (NaniteSourceTriangles > 0 && CookedFallbackTriangles == 0 && !Lod.GetBool(TEXT("nanite"), false)) {
 			CookedFallbackTriangles = FMath::Max(CountTriangles(Lod), 1);
 
@@ -170,8 +225,9 @@ bool IStaticMeshImporter::Import() {
 
 		/* The Cloud counts the stream as LOD 0 and every cooked LOD one on from where the render data has it,
 		 * and the index is what finds a LOD's sections and screen size there. The Nanite mesh stands where
-		 * the fallback did, so it takes the render data's first LOD, and every cooked LOD its own. */
-		if (NaniteSourceTriangles > 0) {
+		 * the fallback did, so it takes the render data's first LOD, and every cooked LOD its own. Without
+		 * the stream, every cooked LOD is its own as well. */
+		if (NaniteSourceTriangles > 0 || bStreamListed) {
 			Lod.SetInteger(TEXT("Index"), Lod.GetBool(TEXT("nanite"), false) ? 0 : Lod.GetInteger(TEXT("Index"), 1) - 1);
 		}
 
@@ -238,17 +294,7 @@ bool IStaticMeshImporter::Import() {
 			 * sense of what is left is the fallback the cook keeps for where Nanite will not
 			 * draw, which is cut down from what somebody modelled. Nanite built from that is a
 			 * Nanite mesh, and it is not the one the game shipped, which is worth saying. */
-			bool bReadBack = false;
-
-			for (const TSharedPtr<FJsonValue>& LodValue : *Lods) {
-				const FUObjectJsonValueExport One = LodValue;
-
-				if (One.JsonObject.IsValid() && One.JsonObject->HasField(TEXT("nanite")) && One.GetBool(TEXT("nanite"))) {
-					bReadBack = true;
-
-					break;
-				}
-			}
+			const bool bReadBack = NaniteSourceTriangles > 0;
 
 			UE_LOG(LogReflection, Display, TEXT("\"%s\" was Nanite over %d cluster(s), and its geometry was %s"),
 				*GetAssetName(), Clusters, bReadBack ? TEXT("read back out of the stream") : TEXT("taken from the fallback"));
