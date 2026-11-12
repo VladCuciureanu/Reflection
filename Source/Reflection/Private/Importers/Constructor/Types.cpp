@@ -24,6 +24,9 @@ TMap<FString, TArray<FString>> ImportTypes::Templated = {
 			TEXT("AnimBoneCompressionSettings"),
 			TEXT("AnimCurveCompressionSettings"),
 			TEXT("FortBakedPropertyMetadataCache"),
+			/* The ShellMesh plugin's fur shell data (a character part's CosmeticPartShellMeshData): a plain object asset,
+			 * its class a game stub where the engine has no ShellMesh plugin */
+			TEXT("ShellMeshAsset"),
 		}
 	},
 	{
